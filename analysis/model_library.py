@@ -54,6 +54,11 @@ class ModelFit(BaseModel):
     bic: float
     delta_bic: float = Field(default=0.0, description="BIC minus the best BIC in the ranking")
 
+    @property
+    def residual_std(self) -> float:
+        """Degrees-of-freedom-corrected residual std, sqrt(SSR / (n - k)); fits always have n > k."""
+        return self.rmse * math.sqrt(self.n_points / (self.n_points - self.n_params))
+
 class SkippedModel(BaseModel):
     key: str
     name: str

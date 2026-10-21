@@ -30,8 +30,9 @@ Data flow per iteration: Planner/Analyst propose a position (JSON) → SafetyGua
 1. **The LLM never talks to hardware directly.** It only returns structured JSON (validated with Pydantic). Every position goes through `HardwareSafetyGuard`. A rejected command is fed back to the agent as an observation, never retried blindly.
 2. **Never `eval`/`exec` LLM output.** Model expressions proposed by an LLM are parsed with `sympy.parse_expr` using a whitelist of symbols and functions only.
 3. **Secrets live only in `.env`** (local) or Streamlit secrets (cloud). Never hard-code or print API keys. `.env` is git-ignored.
-4. **Three LLM providers, selectable by `LLM_PROVIDER`:** `litellm` (real model, name in `LLM_MODEL`, fallbacks in `LLM_FALLBACKS`; free tiers only: Groq main, Gemini backup, local Ollama), `mock` (deterministic, no network; used by all tests and the public demo), `none` (no LLM: heuristic fallback; used as the ablation baseline). Everything must run with `mock` and no API key.
-5. **Free-tier budget is tight** (Groq ~200k tokens/day per model): keep prompts compact, cache responses, back off on 429, never loop on retries.
+4. **Three LLM providers, selectable by `LLM_PROVIDER`:** `litellm` (real model: Claude `LLM_MODEL` first, then Gemini models in `LLM_FALLBACKS`; record which model answered; never fall back silently to mock in a real run), `mock` (deterministic, no network; used by all tests and the public demo), `none` (no LLM: heuristic fallback; used as the ablation baseline). Everything must run with `mock` and no API key.
+5. **API budget is tight** (paid Claude credit, small Gemini free quota): keep prompts compact, cache responses, back off on 429, never loop on retries.
+   The LLM must never set safety bounds or the simulator's ground truth (a mistake found in an earlier teammate version).
 6. **Tests never hit the network or a real LLM.** Use the `mock` provider. `pytest -q` must pass before every commit.
 7. **Reproducibility:** every run takes a `seed`; every random draw uses a `numpy.random.Generator` created from it (no global `np.random.seed`). Every run is saved as a JSON record in `runs/` (config, seed, every step, every LLM call with tokens/cost/latency, fits, final result).
 8. **Blind analysis:** the Analyst must not be told the true law or the experiment's internal name. It sees only variable names, units and data.
@@ -56,8 +57,9 @@ python -m benchmark.run --quick                         # benchmark (after Phase
 - Use `datetime.now(timezone.utc)`, not `datetime.utcnow()`.
 - Use `logging`, not `print`, in library code. The `rich` console output belongs only to the CLI layer.
 - Small, focused modules; one responsibility each. Prefer editing existing files over creating parallel versions.
-- Each new feature comes with tests. Each phase ends with a short `docs/CHANGELOG.md` entry, written as plain notes (what changed, why, how it was verified). These notes feed the project report.
-- Commit after each working step with a clear message.
+- Each new feature comes with tests. Each phase ends with the **Phase checkpoint** from ROADMAP.md (tests, CHANGELOG, commit `Phase N: ...`, tag `phase-N`, push). The `docs/CHANGELOG.md` entry is written as plain notes (what changed, why, how it was verified). These notes feed the project report.
+- Commit after each working step with a clear message; tag `phase-N` at the end of each phase.
+- `reference/` holds a teammate's older version for read-only inspiration. It is git-ignored; never import from it.
 
 ## Known issues in the original code (fixed during the roadmap)
 

@@ -59,11 +59,29 @@ class AgentConfig(BaseModel):
     )
 
 class StoppingConfig(BaseModel):
-    min_points: int = Field(default=5, ge=2, description="Never stop on evidence with fewer measurements than this")
+    # Defaults chosen by the seeded sweep in docs/CHANGELOG.md (Phase 1 fix): min_points = 8 was the
+    # only configuration with >= 19/20 correct laws on every experiment.
+    min_points: int = Field(default=8, ge=2, description="Never stop on evidence with fewer measurements than this")
     delta_bic_threshold: float = Field(default=6.0, description="Best model must beat the runner-up by at least this BIC margin")
     max_rel_se: float = Field(
         default=0.05, gt=0.0,
         description="Every parameter of the best model must have a relative standard error below this"
+    )
+    predictive_stability: bool = Field(
+        default=False,
+        description="Also require the same best model in consecutive analyses and a correctly predicted newest measurement"
+    )
+    stability_window: int = Field(
+        default=2, ge=2,
+        description="The same model must be best, by at least delta_bic_threshold, in this many consecutive analyses"
+    )
+    prediction_max_z: float = Field(
+        default=3.0, gt=0.0,
+        description="The newest measurement must lie within this many sigma of the earlier best fit's prediction"
+    )
+    noise_floor_rel: float = Field(
+        default=0.005, ge=0.0,
+        description="Lower bound on the prediction sigma, as a fraction of the measured y-span (assumed instrument resolution)"
     )
     max_measurements: int = Field(default=30, ge=1, description="Measurement budget")
     max_consecutive_failures: int = Field(

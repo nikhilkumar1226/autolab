@@ -11,9 +11,9 @@ import time
 import logging
 import secrets
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Deque, Optional, Tuple
+from typing import Deque, List, Optional, Tuple
 
 import numpy as np
 
@@ -43,7 +43,7 @@ from agents.executor import HardwareExecutorAgent
 from agents.analyst import DataAnalystAgent
 from agents.tools import LabTools
 from analysis.model_library import MODEL_LIBRARY, AnalysisResult
-from analysis.stopping import StopDecision, StopReason, evaluate_stopping
+from analysis.stopping import PointPrediction, StopDecision, StopReason, evaluate_stopping, predict_new_point
 from records.run_record import (
     ExperimentSnapshot,
     RunRecord,
@@ -71,6 +71,8 @@ class _Run:
     executor: HardwareExecutorAgent
     random_sampler: RandomSampler
     analysis: Optional[AnalysisResult] = None
+    analyses: List[AnalysisResult] = field(default_factory=list)
+    prediction: Optional[PointPrediction] = None
 
 class DiscoveryEngine:
     """
@@ -154,9 +156,7 @@ class DiscoveryEngine:
         except Exception as exc:
             logger.exception("Run %s failed", run_id)
             record.error = f"{type(exc).__name__}: {exc}"
-            record.stop = evaluate_stopping(
-                run.analysis, len(tools.history_x), cfg.stopping, override=StopReason.ERROR
-            )
+            record.stop = self._stop_check(run, len(tools.history_x), override=StopReason.ERROR)
             record.finished_at = datetime.now(timezone.utc)
             record.timings.total_s = time.perf_counter() - t0
             self._save(run)
@@ -194,7 +194,7 @@ class DiscoveryEngine:
         while True:
             n = len(tools.history_x)
             if n >= cfg.stopping.max_measurements:
-                decision = evaluate_stopping(run.analysis, n, cfg.stopping)
+                decision = self._stop_check(run, n)
                 break
 
             index = len(record.steps) + 1
@@ -225,12 +225,17 @@ class DiscoveryEngine:
                     units_x=self.spec.independent.units, units_y=self.spec.dependent.units,
                     n_points=step.n_points,
                 )
+                # The fit made before this measurement predicts it; only then is the point analysed.
+                run.prediction = step.prediction = predict_new_point(
+                    run.analysis, outcome.position, outcome.value, tools.history_y[:-1], cfg.stopping
+                )
                 if step.n_points >= MIN_POINTS_FOR_ANALYSIS:
                     t_an = time.perf_counter()
                     run.analysis = self.analyst.analyze(tools.history_x, tools.history_y, iteration=index)
                     record.timings.analysis_s += time.perf_counter() - t_an
+                    run.analyses.append(run.analysis)
                     step.analysis = run.analysis
-                    decision = evaluate_stopping(run.analysis, step.n_points, cfg.stopping)
+                    decision = self._stop_check(run, step.n_points)
                     run.events.emit(AnalysisCompleted, step=index, analysis=run.analysis, stop_check=decision)
             else:
                 # A rejected command is reported, recorded and never resent blindly.
@@ -241,8 +246,8 @@ class DiscoveryEngine:
                         requested_position=step.requested_position, reason=outcome.message,
                     )
                 if failures >= cfg.stopping.max_consecutive_failures:
-                    decision = evaluate_stopping(
-                        run.analysis, step.n_points, cfg.stopping, override=StopReason.SAFETY_ABORT
+                    decision = self._stop_check(
+                        run, step.n_points, override=StopReason.SAFETY_ABORT
                     ).model_copy(update={"message": f"aborted after {failures} consecutive rejected or failed attempts"})
 
             step.duration_s = time.perf_counter() - t_step
@@ -251,6 +256,13 @@ class DiscoveryEngine:
                 break
 
         record.stop = decision
+
+    def _stop_check(self, run: _Run, n: int, override: Optional[StopReason] = None) -> StopDecision:
+        """Evaluate the stopping rule on the latest analysis, its predecessors and the newest prediction."""
+        return evaluate_stopping(
+            run.analysis, n, self.config.stopping, override=override,
+            previous=run.analyses[:-1], prediction=run.prediction,
+        )
 
     def _next_position(
         self, run: _Run, index: int, queue: Deque[float]
