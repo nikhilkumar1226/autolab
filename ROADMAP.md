@@ -92,10 +92,10 @@ Write a docs/CHANGELOG.md entry. Commit when pytest passes.
 ```
 
 **Done when:**
-- [ ] `pytest -q` passes.
-- [ ] `python main.py --experiment beer_lambert_law` identifies **exponential decay** (it used to say quadratic).
-- [ ] Runs stop at different numbers of points, not always 8.
-- [ ] A JSON file appears in `runs/` for every run.
+- [x] `pytest -q` passes.
+- [x] `python main.py --experiment beer_lambert_law` identifies **exponential decay** (it used to say quadratic).
+- [x] Runs stop at different numbers of points, not always 8. (Caveat: Malus always stops at exactly 8, the new `min_points` floor; see docs/CHANGELOG.md.)
+- [x] A JSON file appears in `runs/` for every run.
 
 ### Phase 1 review (done by Claude on Oct 22) and one fix before Phase 2
 
