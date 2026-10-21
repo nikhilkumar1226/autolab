@@ -10,7 +10,14 @@ from analysis.model_library import (
     fit_library,
     fit_model,
 )
-from analysis.stopping import CriterionCheck, StopDecision, StopReason, evaluate_stopping
+from analysis.stopping import (
+    CriterionCheck,
+    PointPrediction,
+    StopDecision,
+    StopReason,
+    evaluate_stopping,
+    predict_new_point,
+)
 
 __all__ = [
     "AnalysisResult",
@@ -21,7 +28,9 @@ __all__ = [
     "fit_library",
     "fit_model",
     "CriterionCheck",
+    "PointPrediction",
     "StopDecision",
     "StopReason",
     "evaluate_stopping",
+    "predict_new_point",
 ]
