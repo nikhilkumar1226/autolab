@@ -43,6 +43,8 @@ class ModelFit(BaseModel):
     key: str
     name: str
     formula: str
+    origin: Literal["library", "llm"] = Field(default="library", description="Fixed library model, or proposed by the Analyst LLM")
+    expression: Optional[str] = Field(default=None, description="The validated expression of an LLM-proposed model")
     n_points: int
     n_params: int
     params: Dict[str, float]
@@ -98,6 +100,7 @@ class CandidateModel:
     bounds: Callable[[np.ndarray, np.ndarray], Bounds]
     latex: Callable[[Dict[str, float]], str]
     domain_error: Optional[Callable[[np.ndarray], Optional[str]]] = None
+    expression: Optional[str] = None  # set for LLM-proposed models (analysis/candidate_models.py)
 
     @property
     def n_params(self) -> int:
@@ -330,6 +333,8 @@ def fit_model(model: CandidateModel, x: np.ndarray, y: np.ndarray) -> Union[Mode
         key=model.key,
         name=model.name,
         formula=model.formula,
+        origin="library" if model.expression is None else "llm",
+        expression=model.expression,
         n_points=n,
         n_params=k,
         params=params,

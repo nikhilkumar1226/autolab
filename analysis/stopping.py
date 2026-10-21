@@ -28,7 +28,8 @@ from typing import Optional, Sequence
 import numpy as np
 from pydantic import BaseModel, Field
 
-from analysis.model_library import MODEL_LIBRARY, AnalysisResult, ModelFit
+from analysis.candidate_models import predict_fit
+from analysis.model_library import AnalysisResult, ModelFit
 from config import StoppingConfig
 
 
@@ -78,11 +79,10 @@ class StopDecision(BaseModel):
 
 
 def _predict_at(fit: ModelFit, x: float) -> Optional[float]:
-    model = MODEL_LIBRARY.get(fit.key)
-    if model is None:
+    predicted = predict_fit(fit, [x])
+    if predicted is None:
         return None
-    with np.errstate(all="ignore"):
-        value = float(model.predict([x], fit.params)[0])
+    value = float(predicted[0])
     return value if math.isfinite(value) else None
 
 

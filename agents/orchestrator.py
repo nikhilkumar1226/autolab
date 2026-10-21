@@ -42,7 +42,8 @@ from agents.lead_scientist import LeadScientistAgent, default_question
 from agents.executor import HardwareExecutorAgent
 from agents.analyst import DataAnalystAgent
 from agents.tools import LabTools
-from analysis.model_library import MODEL_LIBRARY, AnalysisResult
+from analysis.candidate_models import model_for_fit
+from analysis.model_library import AnalysisResult
 from analysis.stopping import PointPrediction, StopDecision, StopReason, evaluate_stopping, predict_new_point
 from records.run_record import (
     ExperimentSnapshot,
@@ -60,6 +61,10 @@ logger = logging.getLogger(__name__)
 
 # The analyst is first consulted at this many points (3-parameter models need n > 3).
 MIN_POINTS_FOR_ANALYSIS = 4
+
+def _equation(fit) -> Optional[str]:
+    model = model_for_fit(fit) if fit is not None else None
+    return model.equation(fit.params) if model is not None else None
 
 @dataclass
 class _Run:
@@ -285,7 +290,7 @@ class DiscoveryEngine:
         record.result = RunResult(
             n_measurements=len(tools.history_x),
             final_analysis=run.analysis,
-            equation_latex=MODEL_LIBRARY[best.key].equation(best.params) if best is not None else None,
+            equation_latex=_equation(best),
         )
         run.events.emit(RunStopped, decision=record.stop, result=record.result)
 
