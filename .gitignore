@@ -1,0 +1,27 @@
+# secrets
+.env
+.streamlit/secrets.toml
+
+# python
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.hypothesis/
+
+# OS / editor
+.DS_Store
+__MACOSX/
+.vscode/
+.idea/
+
+# generated (keep curated demo runs and final results in git)
+output/*
+!output/plots/
+!output/reports/
+output/plots/*
+output/reports/*
+!output/**/.gitkeep
+runs/*
+!runs/demo/
