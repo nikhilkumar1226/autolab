@@ -24,3 +24,12 @@ def test_bayesian_optimization_uncertainty_sampling():
     # The point with highest uncertainty should be in between sampled points (around 45 or 135 deg)
     assert 20.0 <= suggested_pos <= 160.0
     assert suggested_pos not in [0.0, 90.0, 180.0]
+
+def test_excluded_positions_are_not_proposed_again():
+    engine = ActiveLearningEngine(min_bound=0.0, max_bound=180.0, resolution=100, random_state=0)
+    X = np.array([0.0, 90.0, 180.0])
+    y = np.array([1000.0, 10.0, 1000.0])
+
+    first = engine.suggest_next_sample(X, y)["suggested_position"]
+    second = engine.suggest_next_sample(X, y, exclude=[first])["suggested_position"]
+    assert abs(second - first) > 1.0

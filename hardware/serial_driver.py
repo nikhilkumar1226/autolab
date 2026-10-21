@@ -5,8 +5,8 @@ Handles serial communication, ASCII protocol handshakes, and hardware command pa
 import time
 import logging
 from typing import Optional
-from datetime import datetime
-from hardware.base import BaseHardwareRig, MeasurementResult, RigStatus
+from datetime import datetime, timezone
+from hardware.base import BaseHardwareRig, DataSource, MeasurementResult, RigStatus
 from config import HardwareConfig
 
 logger = logging.getLogger(__name__)
@@ -21,13 +21,27 @@ class SerialHardwareRig(BaseHardwareRig):
       Host -> MCU: 'READ\n'        MCU -> Host: 'STATUS: OK, DATA: 450.2\n'
     """
 
-    def __init__(self, hw_config: Optional[HardwareConfig] = None):
+    def __init__(
+        self,
+        hw_config: Optional[HardwareConfig] = None,
+        units_actuator: str = "deg",
+        units_sensor: str = "lux",
+    ):
         self.config = hw_config or HardwareConfig()
+        self.units_actuator = units_actuator
+        self.units_sensor = units_sensor
         self._serial = None
         self._connected = False
         self._is_homed = False
         self._current_position = 0.0
         self._is_busy = False
+
+    @property
+    def data_source(self) -> DataSource:
+        # Wokwi forwards the simulated Arduino's serial port over RFC2217.
+        if self.config.port.startswith("rfc2217://"):
+            return DataSource.FIRMWARE_IN_THE_LOOP
+        return DataSource.PHYSICAL_RIG
 
     def connect(self) -> bool:
         try:
@@ -113,11 +127,11 @@ class SerialHardwareRig(BaseHardwareRig):
                 data_part = res.split("DATA:")[1].strip()
                 val = float(data_part.split()[0])
                 return MeasurementResult(
-                    timestamp=datetime.utcnow(),
+                    timestamp=datetime.now(timezone.utc),
                     actuator_position=self._current_position,
                     sensor_value=val,
-                    units_actuator="degrees",
-                    units_sensor="lux",
+                    units_actuator=self.units_actuator,
+                    units_sensor=self.units_sensor,
                     is_valid=True,
                     metadata={"raw_response": res}
                 )

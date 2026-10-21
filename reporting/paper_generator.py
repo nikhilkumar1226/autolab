@@ -1,190 +1,264 @@
 """
-Automated Scientific Research Paper Generator.
-Synthesizes experimental discovery logs, statistical model evaluations,
-and generated figures into formal scientific papers in Markdown and LaTeX.
+Automated Scientific Report Generator.
+Turns a run record into a Markdown and a LaTeX report.
+
+Every number comes straight from the run record. The report states the data
+source and makes no claims the record does not support; the interpretive
+discussion is left to the Writer agent.
 """
 from pathlib import Path
-from datetime import datetime
-from typing import Dict, Any, List
-from agents.models import DiscoverySummary, AnalysisResult
+from typing import List, Optional
+from analysis.model_library import AnalysisResult, ModelFit
+from analysis.stopping import CriterionCheck, StopDecision
+from records.run_record import RunRecord
+
+def _fmt(v: Optional[float], spec: str = ".4g") -> str:
+    return "n/a" if v is None else format(v, spec)
+
+def _pct(v: Optional[float]) -> str:
+    return "n/a" if v is None else f"{v:.2%}"
+
+def _tex_escape(text: str) -> str:
+    for a, b in [("\\", r"\textbackslash{}"), ("&", r"\&"), ("%", r"\%"), ("$", r"\$"),
+                 ("#", r"\#"), ("_", r"\_"), ("{", r"\{"), ("}", r"\}"), ("~", r"\textasciitilde{}"),
+                 ("^", r"\textasciicircum{}")]:
+        text = text.replace(a, b)
+    return text
+
+def _sampler_text(record: RunRecord) -> str:
+    if record.config.agent.sampler == "random":
+        return "uniform random sampling within the safe bounds (baseline)"
+    return "Gaussian-process uncertainty sampling (next point = maximum predictive standard deviation)"
+
+def _criteria(stop: StopDecision) -> List[tuple]:
+    def row(label: str, c: CriterionCheck, value: str, threshold: str) -> tuple:
+        return label, value, threshold, "yes" if c.passed else "no", c.detail
+    return [
+        row("Delta-BIC to runner-up", stop.delta_bic, _fmt(stop.delta_bic.value, ".2f"), f">= {stop.delta_bic.threshold:g}"),
+        row("Max relative SE (best model)", stop.max_rel_se, _pct(stop.max_rel_se.value), f"< {stop.max_rel_se.threshold:.0%}"),
+        row("Measurements", stop.min_points, _fmt(stop.min_points.value, ".0f"), f">= {stop.min_points.threshold:.0f}"),
+        row("Budget remaining", stop.budget, _fmt(stop.budget.value, ".0f"), f"< {stop.budget.threshold:.0f}"),
+    ]
+
+def _summary_sentence(record: RunRecord, analysis: Optional[AnalysisResult]) -> str:
+    n = record.result.n_measurements if record.result else 0
+    stop_msg = record.stop.message if record.stop else "unknown"
+    if analysis is None or analysis.best is None:
+        return f"{n} measurements were taken; no model could be fitted. Stop: {stop_msg}."
+    best: ModelFit = analysis.best
+    text = f"After {n} measurements, blind model comparison ranked **{best.name}** first (BIC = {best.bic:.2f})"
+    if analysis.runner_up is not None:
+        text += f", ahead of {analysis.runner_up.name} by ΔBIC = {analysis.delta_bic_runner_up:.2f}"
+    return text + f". Stop: {stop_msg}."
 
 class SciencePaperGenerator:
     """
-    Synthesizes autonomous discovery results into academic research publications.
+    Synthesizes run records into Markdown and LaTeX reports.
     """
 
     def __init__(self, output_dir: Path):
-        self.output_dir = output_dir
+        self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    def generate_markdown_paper(self, summary: DiscoverySummary, analysis: AnalysisResult) -> Path:
+    def generate_markdown_paper(self, record: RunRecord) -> Path:
         """
-        Generates a comprehensive scientific paper in Markdown format.
+        Generates the report in Markdown format.
         """
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        filename = f"scientific_paper_{summary.experiment_id}_{timestamp}.md"
-        filepath = self.output_dir / filename
+        filepath = self.output_dir / f"report_{record.run_id}.md"
+        view = record.experiment.agent_view
+        analysis = record.result.final_analysis if record.result else None
+        best = analysis.best if analysis else None
+        stopping = record.config.stopping
+        hyp = record.hypothesis
 
-        # Format parameter table
-        param_rows = ""
-        for k, v in summary.parameters.items():
-            param_rows += f"| `{k}` | `{v:.4f}` |\n"
+        obs_rows = "".join(
+            f"| {s.index} | {s.source} | {_fmt(s.position, '.2f')} | {_fmt(s.value, '.2f')} |\n"
+            for s in record.steps if s.status == "measured"
+        )
+        rejected = [s for s in record.steps if s.status != "measured"]
+        rejected_md = "".join(
+            f"- Attempt {s.index} ({s.source}) at {_fmt(s.requested_position, '.2f')}: **{s.status}**: {s.message}\n"
+            for s in rejected
+        ) or "None.\n"
 
-        # Model comparison table
         model_rows = ""
-        for m in analysis.candidate_fits:
-            model_rows += f"| **{m.model_name}** | `{m.formula}` | **{m.r2_score:.4f}** | {m.rmse:.3f} | {m.aic:.1f} | {m.bic:.1f} |\n"
+        skipped_md = "None.\n"
+        if analysis is not None:
+            model_rows = "".join(
+                f"| {rank} | {f.name} | `{f.formula}` | {f.n_params} | {f.bic:.2f} | {f.delta_bic:.2f} | {f.r2:.4f} | {f.rmse:.3f} |\n"
+                for rank, f in enumerate(analysis.fits, 1)
+            )
+            if analysis.skipped:
+                skipped_md = "".join(f"- {s.name}: {s.reason}\n" for s in analysis.skipped)
 
-        # Observations table
-        obs_rows = ""
-        for i, (x_val, y_val) in enumerate(zip(summary.observations_x, summary.observations_y), 1):
-            obs_rows += f"| {i} | {x_val:.2f} | {y_val:.2f} |\n"
+        param_rows = ""
+        if best is not None:
+            param_rows = "".join(
+                f"| `{p}` | {_fmt(v)} | {_fmt(best.std_errors[p])} | {_pct(best.rel_std_errors[p])} |\n"
+                for p, v in best.params.items()
+            )
+        equation = f"$$\n{record.result.equation_latex}\n$$" if record.result and record.result.equation_latex else "*No model fitted.*"
 
-        plot_md = f"![Autonomous Discovery Figure]({summary.plot_filepath})" if summary.plot_filepath else "*Figure generation omitted.*"
+        criteria_rows = "".join(
+            f"| {label} | {value} | {thr} | {ok} | {detail} |\n" for label, value, thr, ok, detail in _criteria(record.stop)
+        ) if record.stop else ""
+        stop_reason = record.stop.reason.value if record.stop and record.stop.reason else "unknown"
+        provisional = (
+            "" if stop_reason == "converged" else
+            "\n**The stopping criteria were not all met, so this identification is provisional.**\n"
+        )
 
-        content = f"""# {summary.hypothesis.title}
+        plot_md = f"![Discovery figure]({record.artifacts.plot})" if record.artifacts.plot else "*Figure not generated.*"
 
-**Authors:** Autonomous AI Scientist Agent System$^1$, Human Collaborator$^1$  
-**Affiliation:** $^1$Autonomous Scientific Discovery Laboratory  
-**Date:** {datetime.utcnow().strftime("%B %d, %Y")}  
-**Status:** Peer-Review Ready / Autonomously Generated  
+        content = f"""# {hyp.title if hyp else record.question}
 
----
+> **Data source: {record.data_source.value}**
 
-## Abstract
-This report details the closed-loop empirical investigation and autonomous mathematical derivation of the physical law governing `{summary.hypothesis.independent_variable}` and `{summary.hypothesis.dependent_variable}`. Utilizing a multi-agent orchestration architecture coupled with Bayesian Optimization (Active Learning) and hardware-grounded sensor telemetry, the system iteratively hypothesized, actuated physical hardware, evaluated regression surrogates, and resolved parameter uncertainties. Over **{summary.total_iterations} active learning iterations**, the autonomous agent confirmed **{summary.confirmed_law}** with a coefficient of determination of **$R^2 = {summary.final_r2:.4f}$** and a Root Mean Square Error of **$\\text{{RMSE}} = {summary.final_rmse:.4f}$**.
-
----
-
-## 1. Introduction
-Autonomous scientific discovery systems (Self-Driving Laboratories) represent a paradigm shift in experimental science, transitioning from scripted automation to dynamic hypothesis-driven inquiry [1, 2]. In this study, our objective was to determine the exact functional relationship governing optical transmission through physical polarizers without prior hardcoded assumptions.
-
-### 1.1 Hypothesis Statement
-> **Formal Hypothesis:** *"{summary.hypothesis.statement}"*
-
-The candidate physical relationship under test is hypothesized as:
-$$\\mathcal{{H}}_1: \\quad {summary.hypothesis.target_relationship}$$
-
----
-
-## 2. Experimental Methodology & Hardware-in-the-Loop Architecture
-
-The experimental apparatus comprises a physical rotatory stage and optical sensor subsystem operating under strict hardware safety boundary constraints:
-1. **Actuation & Sensing:** Microcontroller firmware interfaces with a rotational actuator spanning $[{summary.hypothesis.suggested_range[0]}^\\circ, {summary.hypothesis.suggested_range[1]}^\\circ]$ and calibrated photodiode telemetry.
-2. **Safety Nervous System:** Hardcoded bounds clamping and rate-of-change interceptors protect the physical assembly against erroneous agent directives.
-3. **Active Learning Engine:** A Gaussian Process surrogate $\\mathcal{{GP}}(\\mu(x), \\sigma^2(x))$ dynamically selects coordinates of maximal epistemic uncertainty to minimize sample complexity.
-
-```
-+------------------+       +-------------------+       +--------------------+
-|  Planner Agent   | ----> | Hardware Executor | ----> | Hardware / Sensors |
-+------------------+       +-------------------+       +--------------------+
-         ^                           |                            |
-         |                           v                            v
-+------------------+       +-------------------+       +--------------------+
-| Writer / Paper   | <---- |   Data Analyst    | <---- | Safety Interceptor |
-+------------------+       +-------------------+       +--------------------+
-```
+**Run ID:** `{record.run_id}`
+**Started (UTC):** {record.started_at:%Y-%m-%d %H:%M:%S}
+**Seed:** {record.seed} (rerun with the same seed and config to reproduce)
+**Generated by:** AutoLab. Every number below is taken from the run record `{record.run_id}.json`.
 
 ---
 
-## 3. Experimental Observations & Active Sampling
+## Summary
+{_summary_sentence(record, analysis)}
+{provisional}
+## 1. Question and hypothesis
+**Research question:** {record.question}
 
-A total of **{len(summary.observations_x)} discrete measurements** were conducted. Rather than an exhaustive grid sweep, points were prioritized via maximum predictive variance:
+**Apparatus (as described to the agents):** {view.description}
 
-| Trial # | {summary.hypothesis.independent_variable} | {summary.hypothesis.dependent_variable} |
-| :---: | :---: | :---: |
+**Hypothesis:** {hyp.statement if hyp else "n/a"}
+
+## 2. Method
+- **Independent variable (x):** {view.independent.name} ({view.independent.units}), safe range [{view.safe_bounds[0]:g}, {view.safe_bounds[1]:g}]
+- **Dependent variable (y):** {view.dependent.name} ({view.dependent.units})
+- **Sampling:** an initial design of {record.config.agent.initial_sample_count} points across the safe range, then {_sampler_text(record)}. Every position passed through the hardware safety guard.
+- **Blind analysis:** the analyst saw only the measured (x, y) pairs, not the experiment or its true law. It fitted every model in a fixed library of candidates by nonlinear least squares and ranked them by the Bayesian Information Criterion, BIC = n ln(SSR/n) + k ln n.
+- **Stopping rule:** stop when the best model beats the runner-up by ΔBIC ≥ {stopping.delta_bic_threshold:g}, every parameter's relative standard error is below {stopping.max_rel_se:.0%}, and at least {stopping.min_points} points exist; otherwise stop at the budget of {stopping.max_measurements} measurements. Relative SE is SE/|value| for scale parameters, and SE divided by the measured x- or y-span for location and offset parameters.
+
+## 3. Observations
+| Attempt | Source | x ({view.independent.units}) | y ({view.dependent.units}) |
+| :---: | :---: | :---: | :---: |
 {obs_rows}
-
----
-
-## 4. Multi-Model Statistical Hypothesis Testing
-
-To rigorously determine whether the underlying phenomenon adheres to trigonometric cosine-squared modulation or empirical polynomial decay, multiple non-linear models were fitted using Levenberg-Marquardt optimization. Model selection was ranked using the Akaike Information Criterion (AIC) and Bayesian Information Criterion (BIC):
-
-| Candidate Model | Functional Formula | $R^2$ Score | RMSE | AIC | BIC |
-| :--- | :--- | :---: | :---: | :---: | :---: |
+**Rejected or failed attempts:**
+{rejected_md}
+## 4. Model comparison
+| Rank | Model | Formula | k | BIC | ΔBIC | $R^2$ | RMSE |
+| :---: | :--- | :--- | :---: | :---: | :---: | :---: | :---: |
 {model_rows}
-
-### 4.1 Optimal Derived Parameters
-The confirmed physical law **{summary.confirmed_law}** yielded the following optimal parameter constants:
-
-| Parameter Constant | Optimal Estimated Value |
-| :--- | :--- |
+**Models not fitted:**
+{skipped_md}
+## 5. Parameters of the best-ranked model{f": {best.name}" if best else ""}
+| Parameter | Value | Std. error | Relative SE |
+| :--- | :---: | :---: | :---: |
 {param_rows}
+{equation}
 
-Derived Governing Formula:
-$${summary.fitted_equation}$$
+## 6. Stopping decision
+**Reason:** `{stop_reason}`. {record.stop.message if record.stop else ""}
 
----
-
-## 5. Visualizations & Residual Diagnostics
-
+| Criterion | Value | Threshold | Met | Note |
+| :--- | :---: | :---: | :---: | :--- |
+{criteria_rows}
+## 7. Figure
 {plot_md}
 
-*Figure 1: (A) Experimental observations vs. optimal non-linear physical model fit ($R^2 = {summary.final_r2:.4f}$). (B) Gaussian Process active learning surrogate with 95% epistemic confidence intervals. (C) Residual error distribution demonstrating zero-centered Gaussian white noise.*
+*Figure 1: (A) measurements and the best-ranked model; (B) Gaussian-process surrogate with 95% band; (C) residuals of the best-ranked model. Data source: {record.data_source.value}.*
 
----
+## 8. Limitations
+- The best model is only the best of the candidates in the library; a law outside the library cannot be identified.
+- BIC is an asymptotic criterion. With few measurements it can favour the wrong model with ΔBIC above the threshold.
 
-## 6. Discussion & Error Analysis
-The residual analysis demonstrates that error fluctuations are uncorrelated and normally distributed, consistent with detector thermal and ambient shot noise rather than unmodeled systematic distortion. The superior AIC/BIC ranking decisively rules out polynomial and linear approximations in favor of the physical trigonometric formulation.
-
----
-
-## 7. References
-1. Sakana AI, *"The AI Scientist: Towards Fully Automated Open-Ended Scientific Discovery"*, arXiv:2408.06292 (2024).
-2. D. A. Boiko, R. MacKnight, B. Kline, and G. Gomes, *"Autonomous chemical research with large language models"*, *Nature*, vol. 624, pp. 570–578 (2023).
-3. E. L. Malus, *"Sur une propriété de la lumière réfléchie par les corps diaphanes"*, *Mémoires de Physique et de Chimie de la Société d'Arcueil*, vol. 2, pp. 143–158 (1809).
+## References
+1. R. E. Kass and A. E. Raftery, "Bayes Factors", *Journal of the American Statistical Association*, vol. 90, no. 430, pp. 773–795 (1995).
 """
         filepath.write_text(content, encoding="utf-8")
         return filepath
 
-    def generate_latex_paper(self, summary: DiscoverySummary, analysis: AnalysisResult) -> Path:
+    def generate_latex_paper(self, record: RunRecord) -> Path:
         """
-        Generates formal LaTeX source code for the scientific publication.
+        Generates LaTeX source for the report.
         """
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        filename = f"scientific_paper_{summary.experiment_id}_{timestamp}.tex"
-        filepath = self.output_dir / filename
+        filepath = self.output_dir / f"report_{record.run_id}.tex"
+        view = record.experiment.agent_view
+        analysis = record.result.final_analysis if record.result else None
+        best = analysis.best if analysis else None
+        esc = _tex_escape
 
-        tex_content = f"""\\documentclass[journal,10pt,twocolumn]{{article}}
-\\usepackage[margin=0.75in]{{geometry}}
-\\usepackage{{amsmath,amssymb,amsfonts}}
-\\usepackage{{graphicx}}
+        model_rows = ""
+        if analysis is not None:
+            model_rows = "\n".join(
+                f"{esc(f.name)} & {f.n_params} & {f.bic:.2f} & {f.delta_bic:.2f} & {f.r2:.4f} \\\\"
+                for f in analysis.fits
+            )
+        param_rows = ""
+        if best is not None:
+            param_rows = "\n".join(
+                f"{esc(p)} & {_fmt(v)} & {_fmt(best.std_errors[p])} & {esc(_pct(best.rel_std_errors[p]))} \\\\"
+                for p, v in best.params.items()
+            )
+        equation = (
+            f"\\begin{{equation}}\n{record.result.equation_latex}\n\\end{{equation}}"
+            if record.result and record.result.equation_latex else "No model was fitted."
+        )
+        summary = esc(_summary_sentence(record, analysis).replace("**", ""))
+        stop_reason = record.stop.reason.value if record.stop and record.stop.reason else "unknown"
+
+        tex_content = f"""\\documentclass[10pt]{{article}}
+\\usepackage[margin=0.9in]{{geometry}}
+\\usepackage[utf8]{{inputenc}}
+\\usepackage{{amsmath,amssymb}}
 \\usepackage{{booktabs}}
-\\usepackage{{hyperref}}
+\\usepackage{{newunicodechar}}
+\\newunicodechar{{Δ}}{{$\\Delta$}}
+\\newunicodechar{{θ}}{{$\\theta$}}
 
-\\title{{{summary.hypothesis.title}}}
-\\author{{Autonomous AI Scientist Agent System \\and Human Collaborator}}
-\\date{{\\today}}
+\\title{{{esc(record.hypothesis.title if record.hypothesis else record.question)}}}
+\\author{{AutoLab (automated report)}}
+\\date{{{record.started_at:%Y-%m-%d}}}
 
 \\begin{{document}}
 \\maketitle
 
+\\noindent\\fbox{{\\textbf{{Data source: {esc(record.data_source.value)}}}}}\\quad Run \\texttt{{{esc(record.run_id)}}}, seed {record.seed}.
+
 \\begin{{abstract}}
-We report the autonomous closed-loop discovery and mathematical confirmation of {summary.confirmed_law}. 
-Operating without hardcoded physical assumptions, our agentic laboratory system performed iterative 
-hypothesis generation, hardware actuation, active learning via Gaussian Process Bayesian optimization, 
-and statistical model selection over {summary.total_iterations} trials. 
-The confirmed physical law achieved an $R^2$ of {summary.final_r2:.4f} and RMSE of {summary.final_rmse:.4f}.
+{summary}
 \\end{{abstract}}
 
-\\section{{Introduction}}
-Self-Driving Laboratories (SDLs) automate the full cycle of scientific investigation. 
-In this experiment, the agent investigated the functional dependency between 
-\\textbf{{{summary.hypothesis.independent_variable}}} and \\textbf{{{summary.hypothesis.dependent_variable}}}.
+\\section{{Method}}
+The independent variable is {esc(view.independent.name)} ({esc(view.independent.units)}) within the safe range
+[{view.safe_bounds[0]:g}, {view.safe_bounds[1]:g}]; the dependent variable is {esc(view.dependent.name)} ({esc(view.dependent.units)}).
+Every position passed through the hardware safety guard. The analyst saw only the measured $(x, y)$ pairs and ranked a fixed
+library of candidate models by BIC.
 
-\\section{{Methodology}}
-Hardware safety boundaries were enforced by a software guard layer. Active sampling was directed by an active learning Gaussian Process surrogate model to minimize sample counts while maximizing information gain.
+\\section{{Model comparison}}
+\\begin{{tabular}}{{lcccc}}
+\\toprule
+Model & $k$ & BIC & $\\Delta$BIC & $R^2$ \\\\
+\\midrule
+{model_rows}
+\\bottomrule
+\\end{{tabular}}
 
-\\section{{Results \\& Model Comparison}}
-Non-linear regression was executed across multiple competing candidate models. The trigonometric physical formulation achieved the lowest AIC/BIC score:
+\\section{{Best-ranked model}}
+\\begin{{tabular}}{{lccc}}
+\\toprule
+Parameter & Value & Std.\\ error & Relative SE \\\\
+\\midrule
+{param_rows}
+\\bottomrule
+\\end{{tabular}}
 
-\\begin{{equation}}
-{summary.fitted_equation}
-\\end{{equation}}
+{equation}
 
-\\section{{Conclusion}}
-The closed-loop system successfully discovered and verified the physical relationship with statistical significance ($R^2 = {summary.final_r2:.4f}$).
+\\section{{Stopping decision}}
+Reason: \\texttt{{{esc(stop_reason)}}}. {esc(record.stop.message) if record.stop else ""}
+
+\\section{{Limitations}}
+Only models in the candidate library can be identified, and BIC can favour the wrong model when few measurements are available.
 
 \\end{{document}}
 """

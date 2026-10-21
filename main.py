@@ -2,10 +2,12 @@
 Main entrypoint for the Autonomous Scientific Discovery System.
 Run autonomous scientific discovery loops on digital twin simulation or real physical hardware.
 """
-import sys
 import argparse
-from config import config, SystemConfig, HardwareConfig, SimulationConfig, AgentConfig
-from agents.orchestrator import AutonomousDiscoveryEngine
+import logging
+from config import config, SystemConfig, HardwareConfig, AgentConfig, StoppingConfig, OutputConfig
+from experiments.registry import list_experiments
+from agents.orchestrator import DiscoveryEngine
+from cli.console import ConsoleEventPrinter
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -15,14 +17,44 @@ def parse_args():
         "--experiment",
         type=str,
         default="malus_law",
-        choices=["malus_law", "inverse_square_law"],
-        help="Scientific experiment to run (default: malus_law)"
+        choices=list_experiments(),
+        help="Experiment from the registry (default: malus_law)"
     )
     parser.add_argument(
-        "--prompt",
+        "--question", "--prompt",
+        dest="question",
         type=str,
-        default="Investigate the mathematical relationship between polarizer angle and transmitted light intensity",
-        help="High-level scientific inquiry prompt for the Lead Scientist Agent"
+        default=None,
+        help="Research question for the planner (default: a neutral question built from the variable names)"
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Seed for every random draw in the run (default: drawn at random, then recorded)"
+    )
+    parser.add_argument(
+        "--budget",
+        type=int,
+        default=StoppingConfig().max_measurements,
+        help=f"Maximum number of measurements (default: {StoppingConfig().max_measurements})"
+    )
+    parser.add_argument(
+        "--rse-threshold",
+        type=float,
+        default=StoppingConfig().max_rel_se,
+        help=f"Max relative standard error per parameter to stop (default: {StoppingConfig().max_rel_se})"
+    )
+    parser.add_argument(
+        "--sampler",
+        choices=["gp", "random"],
+        default="gp",
+        help="How to choose points after the initial design (default: gp uncertainty sampling)"
+    )
+    parser.add_argument(
+        "--no-report",
+        action="store_true",
+        help="Skip the figure and Markdown/LaTeX report (the JSON run record is always written)"
     )
     parser.add_argument(
         "--hardware",
@@ -41,58 +73,37 @@ def parse_args():
         default=config.hardware.baud_rate,
         help=f"Baud rate for serial connection (default: {config.hardware.baud_rate})"
     )
-    parser.add_argument(
-        "--max-iterations",
-        type=int,
-        default=12,
-        help="Maximum discovery iterations before termination (default: 12)"
-    )
-    parser.add_argument(
-        "--r2-threshold",
-        type=float,
-        default=0.985,
-        help="R^2 threshold for scientific convergence (default: 0.985)"
-    )
     return parser.parse_args()
 
 def main():
     args = parse_args()
-
-    # Configure system
-    sim_mode = not args.hardware
-    
-    # Adjust prompt if running inverse square law with default prompt
-    prompt = args.prompt
-    if args.experiment == "inverse_square_law" and "polarizer" in prompt:
-        prompt = "Investigate how light radiant intensity decays as distance increases from a stationary source"
+    logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
 
     sys_config = SystemConfig(
+        experiment=args.experiment,
+        seed=args.seed,
         hardware=HardwareConfig(
-            simulate=sim_mode,
+            simulate=not args.hardware,
             port=args.port,
             baud_rate=args.baud,
-            min_actuator_value=0.0 if args.experiment == "malus_law" else 5.0,
-            max_actuator_value=180.0 if args.experiment == "malus_law" else 100.0,
         ),
-        simulation=SimulationConfig(
-            experiment_type=args.experiment,
-            i0_intensity=1000.0,
-            theta_offset=0.0,
-            noise_std=10.0
-        ),
-        agent=AgentConfig(
-            max_discovery_iterations=args.max_iterations,
-            convergence_r2_threshold=args.r2_threshold
-        )
+        agent=AgentConfig(sampler=args.sampler),
+        stopping=StoppingConfig(max_measurements=args.budget, max_rel_se=args.rse_threshold),
+        output=OutputConfig(write_report=not args.no_report),
     )
 
-    engine = AutonomousDiscoveryEngine(sys_config)
-    summary = engine.run_discovery_loop(research_goal=prompt)
-    
-    print("\nDiscovery completed successfully!")
-    print(f"Summary: Discovered {summary.confirmed_law} with R^2 = {summary.final_r2:.4f}")
-    print(f"Paper report: {summary.paper_filepath}")
-    print(f"Visualization: {summary.plot_filepath}")
+    printer = ConsoleEventPrinter()
+    engine = DiscoveryEngine(sys_config, on_event=printer)
+    record = engine.run(question=args.question)
+
+    rerun = f"python main.py --experiment {args.experiment} --seed {record.seed}"
+    if args.budget != StoppingConfig().max_measurements:
+        rerun += f" --budget {args.budget}"
+    if args.rse_threshold != StoppingConfig().max_rel_se:
+        rerun += f" --rse-threshold {args.rse_threshold}"
+    if args.sampler != "gp":
+        rerun += f" --sampler {args.sampler}"
+    printer.console.print(f"\n[bold]Done.[/bold] Reproduce this run with: [cyan]{rerun}[/cyan]")
 
 if __name__ == "__main__":
     main()

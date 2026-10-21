@@ -1,212 +1,307 @@
 """
 Discovery Orchestrator.
 Main controller managing the closed-loop autonomous scientific discovery lifecycle.
-"""
-import uuid
-import logging
-from datetime import datetime
-from typing import Dict, Any, Optional
-import numpy as np
-from rich.console import Console
-from rich.table import Table
-from rich.panel import Panel
 
-from config import SystemConfig, config as default_config, PLOTS_DIR, REPORTS_DIR
+The engine never prints: it reports progress through typed events (agents/events.py)
+and saves a JSON run record (records/run_record.py) for every run, including failed ones.
+"""
+import math
+import uuid
+import time
+import logging
+import secrets
+from collections import deque
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Deque, Optional, Tuple
+
+import numpy as np
+
+from config import SystemConfig, config as default_config
+from experiments.registry import AgentExperimentView, ExperimentSpec, get_experiment
 from hardware.base import BaseHardwareRig
 from hardware.simulator import PhysicsSimulationRig
 from hardware.serial_driver import SerialHardwareRig
-from hardware.safety_guard import HardwareSafetyGuard
-from optimization.bayesian_opt import ActiveLearningEngine, AcquisitionStrategy
-from agents.models import Hypothesis, AnalysisResult, DiscoverySummary
-from agents.lead_scientist import LeadScientistAgent
+from hardware.safety_guard import HardwareSafetyGuard, SafetyLimits
+from optimization.bayesian_opt import ActiveLearningEngine
+from optimization.baselines import RandomSampler
+from agents.models import GPSuggestion
+from agents.events import (
+    AnalysisCompleted,
+    EventCallback,
+    EventEmitter,
+    GPUpdated,
+    HypothesisProposed,
+    MeasurementTaken,
+    ReportReady,
+    RunStarted,
+    RunStopped,
+    SafetyRejected,
+)
+from agents.lead_scientist import LeadScientistAgent, default_question
 from agents.executor import HardwareExecutorAgent
 from agents.analyst import DataAnalystAgent
 from agents.tools import LabTools
+from analysis.model_library import MODEL_LIBRARY, AnalysisResult
+from analysis.stopping import StopDecision, StopReason, evaluate_stopping
+from records.run_record import (
+    ExperimentSnapshot,
+    RunRecord,
+    RunResult,
+    StepRecord,
+    StepSource,
+    record_path,
+    save_run_record,
+)
 from reporting.visualizer import ScienceVisualizer
 from reporting.paper_generator import SciencePaperGenerator
 
 logger = logging.getLogger(__name__)
-console = Console()
 
-class AutonomousDiscoveryEngine:
+# The analyst is first consulted at this many points (3-parameter models need n > 3).
+MIN_POINTS_FOR_ANALYSIS = 4
+
+@dataclass
+class _Run:
+    """Per-run state, so one engine can run several times without leaking history."""
+    record: RunRecord
+    events: EventEmitter
+    guard: HardwareSafetyGuard
+    tools: LabTools
+    executor: HardwareExecutorAgent
+    random_sampler: RandomSampler
+    analysis: Optional[AnalysisResult] = None
+
+class DiscoveryEngine:
     """
     Coordinates the end-to-end closed-loop discovery:
-    Hypothesize -> Actuate -> Observe -> Bayesian Optimize -> Model Selection -> Publish
+    Hypothesize -> Actuate (through the safety guard) -> Observe -> Blind model selection
+    -> Stopping rule -> Active learning -> ... -> Report
     """
 
-    def __init__(self, sys_config: Optional[SystemConfig] = None):
+    def __init__(
+        self,
+        sys_config: Optional[SystemConfig] = None,
+        on_event: Optional[EventCallback] = None,
+        spec: Optional[ExperimentSpec] = None,
+    ):
         self.config = sys_config or default_config
-        self.rig: BaseHardwareRig = (
-            PhysicsSimulationRig(self.config.simulation)
-            if self.config.hardware.simulate
-            else SerialHardwareRig(self.config.hardware)
-        )
-        self.safety_guard = HardwareSafetyGuard(self.rig, self.config.hardware)
-        self.optimizer = ActiveLearningEngine(
-            min_bound=self.config.hardware.min_actuator_value,
-            max_bound=self.config.hardware.max_actuator_value
-        )
-        self.tools = LabTools(self.safety_guard, self.optimizer)
+        # `spec` overrides the registry entry (tests and benchmark variants).
+        self.spec = spec or get_experiment(self.config.experiment)
+        self.on_event = on_event
 
         # Agent personas
-        self.scientist = LeadScientistAgent(self.config.agent.model_name)
-        self.executor = HardwareExecutorAgent(self.tools)
-        self.analyst = DataAnalystAgent(self.config.agent.convergence_r2_threshold)
+        self.scientist = LeadScientistAgent()
+        self.analyst = DataAnalystAgent()
 
         # Reporting
-        self.visualizer = ScienceVisualizer(PLOTS_DIR)
-        self.paper_generator = SciencePaperGenerator(REPORTS_DIR)
+        self.visualizer = ScienceVisualizer(self.config.output.plots_dir)
+        self.paper_generator = SciencePaperGenerator(self.config.output.reports_dir)
 
-    def run_discovery_loop(self, research_goal: str) -> DiscoverySummary:
+    def _build_rig(self, rng: np.random.Generator) -> BaseHardwareRig:
+        if self.config.hardware.simulate:
+            return PhysicsSimulationRig(self.spec, rng, self.config.simulation)
+        return SerialHardwareRig(
+            self.config.hardware,
+            units_actuator=self.spec.independent.units,
+            units_sensor=self.spec.dependent.units,
+        )
+
+    def run(self, question: Optional[str] = None) -> RunRecord:
         """
-        Executes the autonomous closed-loop scientific experiment.
+        Executes one seeded closed-loop experiment and returns its run record.
         """
-        experiment_id = f"EXP_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{str(uuid.uuid4())[:4]}"
-        start_time = datetime.utcnow()
+        cfg = self.config
+        view = self.spec.agent_view()
+        question = question or default_question(view)
+        seed = cfg.seed if cfg.seed is not None else secrets.randbits(32)
 
-        console.print(Panel.fit(
-            f"[bold cyan]AUTONOMOUS SCIENTIFIC DISCOVERY SYSTEM[/bold cyan]\n"
-            f"[yellow]Experiment ID:[/yellow] {experiment_id}\n"
-            f"[yellow]Research Prompt:[/yellow] {research_goal}\n"
-            f"[yellow]Hardware Mode:[/yellow] {'DIGITAL TWIN SIMULATION' if self.config.hardware.simulate else 'PHYSICAL SERIAL RIG'}",
-            border_style="cyan"
-        ))
+        # Independent random streams, all derived from the one run seed.
+        sim_seq, gp_seq, sampler_seq = np.random.SeedSequence(seed).spawn(3)
+        rig = self._build_rig(np.random.default_rng(sim_seq))
+        lo, hi = self.spec.safe_bounds
+        guard = HardwareSafetyGuard(
+            rig, SafetyLimits(min_position=lo, max_position=hi, max_step_delta=self.spec.max_step_delta)
+        )
+        optimizer = ActiveLearningEngine(min_bound=lo, max_bound=hi, random_state=int(gp_seq.generate_state(1)[0]))
+        tools = LabTools(guard, optimizer)
 
-        # 1. Connect and Home Hardware
-        console.print("[dim]Connecting and homing hardware rig...[/dim]")
-        self.safety_guard.connect()
-        self.safety_guard.home()
+        started = datetime.now(timezone.utc)
+        run_id = f"{started:%Y%m%dT%H%M%SZ}_{self.spec.name}_s{seed}_{uuid.uuid4().hex[:4]}"
+        noise_std = rig.noise_std if isinstance(rig, PhysicsSimulationRig) else None
+        record = RunRecord(
+            run_id=run_id,
+            started_at=started,
+            seed=seed,
+            question=question,
+            data_source=rig.data_source,
+            experiment=ExperimentSnapshot.from_spec(self.spec, noise_std),
+            config=cfg.model_copy(update={"seed": seed}),
+        )
+        run = _Run(
+            record=record,
+            events=EventEmitter(run_id, self.on_event),
+            guard=guard,
+            tools=tools,
+            executor=HardwareExecutorAgent(tools),
+            random_sampler=RandomSampler(lo, hi, np.random.default_rng(sampler_seq)),
+        )
 
-        # 2. Formulate Hypothesis
-        console.print("\n[bold green]=== Step 1: Lead Scientist Formulating Hypothesis ===[/bold green]")
-        hypothesis: Hypothesis = self.scientist.formulate_hypothesis(research_goal)
-        console.print(f"[bold]Title:[/bold] {hypothesis.title}")
-        console.print(f"[bold]Hypothesis:[/bold] {hypothesis.statement}")
-        console.print(f"[bold]Target Model:[/bold] {hypothesis.target_relationship}")
-        console.print(f"[bold]Parameter Domain:[/bold] [{hypothesis.suggested_range[0]}, {hypothesis.suggested_range[1]}]")
-
-        # 3. Initial Exploratory Sampling
-        console.print("\n[bold green]=== Step 2: Initial Exploratory Baseline Survey ===[/bold green]")
-        init_steps = self.scientist.generate_initial_plan(hypothesis, num_samples=self.config.agent.initial_sample_count)
-        for step in init_steps:
-            res = self.executor.execute_step(step.target_position, step.rationale)
-            console.print(f"  -> Actuated to {res['position']:>6.1f}° | Sensor: {res['sensor_value']:>7.2f} lux")
-
-        # 4. Closed-Loop Active Learning / Bayesian Optimization Iterations
-        console.print("\n[bold green]=== Step 3: Active Learning & Statistical Convergence Loop ===[/bold green]")
-        analysis: Optional[AnalysisResult] = None
-        iteration = len(init_steps)
-
-        while iteration < self.config.agent.max_discovery_iterations:
-            iteration += 1
-            
-            # Analyze current dataset
-            analysis = self.analyst.analyze_dataset(
-                X_data=self.tools.history_x,
-                y_data=self.tools.history_y,
-                experiment_type=self.config.simulation.experiment_type,
-                iteration=iteration
+        t0 = time.perf_counter()
+        try:
+            self._experiment_loop(run, view)
+            self._finish(run, t0)
+        except Exception as exc:
+            logger.exception("Run %s failed", run_id)
+            record.error = f"{type(exc).__name__}: {exc}"
+            record.stop = evaluate_stopping(
+                run.analysis, len(tools.history_x), cfg.stopping, override=StopReason.ERROR
             )
+            record.finished_at = datetime.now(timezone.utc)
+            record.timings.total_s = time.perf_counter() - t0
+            self._save(run)
+            raise
+        finally:
+            guard.disconnect()
+        return record
 
-            best_m = analysis.best_model
-            console.print(
-                f"[cyan][Iter {iteration:02d}][/cyan] Best Fit: [bold]{best_m.model_name}[/bold] "
-                f"| R² = [bold green]{best_m.r2_score:.4f}[/bold green] "
-                f"| RMSE = {best_m.rmse:.2f} "
-                f"| Total Samples: {len(self.tools.history_x)}"
-            )
+    def _experiment_loop(self, run: _Run, view: AgentExperimentView) -> None:
+        cfg, record, tools = self.config, run.record, run.tools
 
-            # Check if convergence reached
-            if analysis.is_converged:
-                console.print(f"\n[bold green]✓ SCIENTIFIC CONVERGENCE ACHIEVED:[/bold green] {analysis.convergence_rationale}")
+        run.events.emit(
+            RunStarted,
+            question=record.question,
+            experiment=self.spec.name,
+            seed=record.seed,
+            data_source=record.data_source,
+            budget=cfg.stopping.max_measurements,
+            sampler=cfg.agent.sampler,
+        )
+
+        # 1. Connect and home hardware
+        run.guard.connect()
+        run.guard.home()
+
+        # 2. Formulate hypothesis and initial design from the agent-facing view only
+        hypothesis = self.scientist.formulate_hypothesis(record.question, view)
+        plan = self.scientist.generate_initial_plan(view, num_samples=cfg.agent.initial_sample_count)
+        record.hypothesis = hypothesis
+        run.events.emit(HypothesisProposed, hypothesis=hypothesis, initial_design=[s.target_position for s in plan])
+
+        # 3. Measure -> analyse -> stopping rule -> next point, until a stop criterion fires
+        queue: Deque[float] = deque(s.target_position for s in plan)
+        failures = 0
+        while True:
+            n = len(tools.history_x)
+            if n >= cfg.stopping.max_measurements:
+                decision = evaluate_stopping(run.analysis, n, cfg.stopping)
                 break
 
-            # Suggest next optimal point using Active Learning Gaussian Process
-            suggestion = self.tools.tool_suggest_next_point(strategy="uncertainty")
-            next_pos = suggestion["suggested_position"]
-            max_sigma = suggestion.get("max_sigma", 0.0)
+            index = len(record.steps) + 1
+            t_step = time.perf_counter()
+            position, source, suggestion = self._next_position(run, index, queue)
 
-            console.print(f"  [yellow]Active Learning (Uncertainty Sampling):[/yellow] Proposing next target at [bold]{next_pos:.1f}°[/bold] (Uncertainty σ = {max_sigma:.2f})")
-            
-            # Execute next measurement
-            res = self.executor.execute_step(next_pos, rationale="Active Learning Epistemic Variance Minimization")
-            console.print(f"  -> Actuated to {res['position']:>6.1f}° | Sensor: {res['sensor_value']:>7.2f} lux")
+            t_hw = time.perf_counter()
+            outcome = run.executor.execute_step(position, rationale=source)
+            record.timings.hardware_s += time.perf_counter() - t_hw
 
-        # Final Analysis
-        final_analysis = self.analyst.analyze_dataset(
-            X_data=self.tools.history_x,
-            y_data=self.tools.history_y,
-            experiment_type=self.config.simulation.experiment_type,
-            iteration=iteration
+            step = StepRecord(
+                index=index,
+                source=source,
+                requested_position=position if math.isfinite(position) else None,
+                status=outcome.status,
+                position=outcome.position,
+                value=outcome.value,
+                message=outcome.message,
+                n_points=len(tools.history_x),
+                gp=suggestion,
+            )
+            decision: Optional[StopDecision] = None
+            if outcome.status == "measured":
+                failures = 0
+                run.events.emit(
+                    MeasurementTaken,
+                    step=index, source=source, position=outcome.position, value=outcome.value,
+                    units_x=self.spec.independent.units, units_y=self.spec.dependent.units,
+                    n_points=step.n_points,
+                )
+                if step.n_points >= MIN_POINTS_FOR_ANALYSIS:
+                    t_an = time.perf_counter()
+                    run.analysis = self.analyst.analyze(tools.history_x, tools.history_y, iteration=index)
+                    record.timings.analysis_s += time.perf_counter() - t_an
+                    step.analysis = run.analysis
+                    decision = evaluate_stopping(run.analysis, step.n_points, cfg.stopping)
+                    run.events.emit(AnalysisCompleted, step=index, analysis=run.analysis, stop_check=decision)
+            else:
+                # A rejected command is reported, recorded and never resent blindly.
+                failures += 1
+                if outcome.status == "rejected":
+                    run.events.emit(
+                        SafetyRejected, step=index, source=source,
+                        requested_position=step.requested_position, reason=outcome.message,
+                    )
+                if failures >= cfg.stopping.max_consecutive_failures:
+                    decision = evaluate_stopping(
+                        run.analysis, step.n_points, cfg.stopping, override=StopReason.SAFETY_ABORT
+                    ).model_copy(update={"message": f"aborted after {failures} consecutive rejected or failed attempts"})
+
+            step.duration_s = time.perf_counter() - t_step
+            record.steps.append(step)
+            if decision is not None and decision.should_stop:
+                break
+
+        record.stop = decision
+
+    def _next_position(
+        self, run: _Run, index: int, queue: Deque[float]
+    ) -> Tuple[float, StepSource, Optional[GPSuggestion]]:
+        if queue:
+            return queue.popleft(), "initial_design", None
+        if self.config.agent.sampler == "random":
+            return run.random_sampler.suggest(), "random", None
+
+        t_gp = time.perf_counter()
+        suggestion = run.tools.tool_suggest_next_point(strategy="uncertainty")
+        curve = run.tools.gp_curve()
+        run.record.timings.gp_s += time.perf_counter() - t_gp
+        run.events.emit(GPUpdated, step=index, suggestion=suggestion, curve=curve)
+        return suggestion.position, "gp", suggestion
+
+    def _finish(self, run: _Run, t0: float) -> None:
+        record, tools = run.record, run.tools
+        best = run.analysis.best if run.analysis is not None else None
+        record.result = RunResult(
+            n_measurements=len(tools.history_x),
+            final_analysis=run.analysis,
+            equation_latex=MODEL_LIBRARY[best.key].equation(best.params) if best is not None else None,
         )
-        best_model = final_analysis.best_model
+        run.events.emit(RunStopped, decision=record.stop, result=record.result)
 
-        # 5. Visualizer: Generate Publication-Grade Plots
-        console.print("\n[bold green]=== Step 4: Generating Publication-Grade Visualizations ===[/bold green]")
-        self.optimizer.fit(np.array(self.tools.history_x), np.array(self.tools.history_y))
-        gp_mu, gp_sigma = self.optimizer.predict(self.optimizer.candidate_grid)
+        # 4. Figure and Markdown/LaTeX report
+        if self.config.output.write_report and tools.history_x:
+            t_rep = time.perf_counter()
+            self._write_report(run)
+            record.timings.report_s = time.perf_counter() - t_rep
 
-        plot_path = self.visualizer.generate_discovery_figure(
-            X_data=self.tools.history_x,
-            y_data=self.tools.history_y,
-            experiment_type=self.config.simulation.experiment_type,
-            best_model_name=best_model.model_name,
-            optimal_params=best_model.optimal_parameters,
-            r2_score=best_model.r2_score,
-            rmse=best_model.rmse,
-            gp_mu=gp_mu,
-            gp_sigma=gp_sigma,
-            gp_grid=self.optimizer.candidate_grid
-        )
-        console.print(f"  [cyan]Figure saved to:[/cyan] {plot_path}")
+        record.finished_at = datetime.now(timezone.utc)
+        record.timings.total_s = time.perf_counter() - t0
+        self._save(run)
+        run.events.emit(ReportReady, artifacts=record.artifacts)
 
-        # Formulate final fitted equation string
-        if self.config.simulation.experiment_type == "malus_law":
-            eq = f"I(\\theta) = {best_model.optimal_parameters.get('I0', 0):.2f} \\cos^2(\\theta - {best_model.optimal_parameters.get('theta0', 0):.2f}^\\circ) + {best_model.optimal_parameters.get('C', 0):.2f}"
-        else:
-            eq = f"I(d) = \\frac{{{best_model.optimal_parameters.get('I0', 0):.2f} \\times 100}}{{(d + {best_model.optimal_parameters.get('d0', 0):.2f})^2}} + {best_model.optimal_parameters.get('C', 0):.2f}"
+    def _write_report(self, run: _Run) -> None:
+        record, tools = run.record, run.tools
+        gp_grid = gp_mu = gp_sigma = None
+        if len(tools.history_x) >= 2:
+            tools.optimizer.fit(np.array(tools.history_x), np.array(tools.history_y))
+            gp_grid = tools.optimizer.candidate_grid
+            gp_mu, gp_sigma = tools.optimizer.predict(gp_grid)
 
-        end_time = datetime.utcnow()
-        summary = DiscoverySummary(
-            experiment_id=experiment_id,
-            start_time=start_time,
-            end_time=end_time,
-            total_iterations=len(self.tools.history_x),
-            hypothesis=hypothesis,
-            confirmed_law=best_model.model_name,
-            fitted_equation=eq,
-            final_r2=best_model.r2_score,
-            final_rmse=best_model.rmse,
-            parameters=best_model.optimal_parameters,
-            observations_x=self.tools.history_x,
-            observations_y=self.tools.history_y,
-            plot_filepath=str(plot_path)
-        )
+        plot_path = self.visualizer.generate_discovery_figure(record, gp_grid=gp_grid, gp_mu=gp_mu, gp_sigma=gp_sigma)
+        record.artifacts.plot = str(plot_path)
+        record.artifacts.report_md = str(self.paper_generator.generate_markdown_paper(record))
+        record.artifacts.report_tex = str(self.paper_generator.generate_latex_paper(record))
 
-        # 6. Writer: Synthesize Markdown & LaTeX Paper
-        console.print("\n[bold green]=== Step 5: Automated Scientific Paper Synthesis ===[/bold green]")
-        md_paper_path = self.paper_generator.generate_markdown_paper(summary, final_analysis)
-        tex_paper_path = self.paper_generator.generate_latex_paper(summary, final_analysis)
-        summary.paper_filepath = str(md_paper_path)
-
-        console.print(f"  [cyan]Markdown Paper saved to:[/cyan] {md_paper_path}")
-        console.print(f"  [cyan]LaTeX Paper saved to:[/cyan] {tex_paper_path}")
-
-        # Disconnect rig cleanly
-        self.safety_guard.disconnect()
-
-        # Display Final Summary Table
-        table = Table(title="Autonomous Scientific Discovery Results", show_lines=True)
-        table.add_column("Property", style="cyan", no_wrap=True)
-        table.add_column("Discovered Result", style="green")
-        table.add_row("Hypothesis", hypothesis.statement)
-        table.add_row("Confirmed Physical Law", best_model.model_name)
-        table.add_row("Mathematical Equation", eq)
-        table.add_row("Coefficient of Determination ($R^2$)", f"{best_model.r2_score:.4f}")
-        table.add_row("Root Mean Square Error (RMSE)", f"{best_model.rmse:.3f} lux")
-        table.add_row("Total Measurements Conducted", str(len(self.tools.history_x)))
-        table.add_row("Report Document", str(md_paper_path))
-        table.add_row("Plot Artifact", str(plot_path))
-        console.print("\n", table)
-
-        return summary
+    def _save(self, run: _Run) -> None:
+        runs_dir = self.config.output.runs_dir
+        run.record.artifacts.record = str(record_path(run.record.run_id, runs_dir))
+        save_run_record(run.record, runs_dir)

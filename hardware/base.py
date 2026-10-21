@@ -2,12 +2,19 @@
 Abstract base class and data contracts for experimental hardware rigs.
 """
 from abc import ABC, abstractmethod
+from enum import Enum
 from typing import Optional, Dict, Any
 from pydantic import BaseModel, Field
-from datetime import datetime
+from datetime import datetime, timezone
+
+class DataSource(str, Enum):
+    """Where measurements come from. Shown on every dashboard, plot, report and run record."""
+    DIGITAL_TWIN = "DIGITAL TWIN"
+    FIRMWARE_IN_THE_LOOP = "FIRMWARE-IN-THE-LOOP (Wokwi)"
+    PHYSICAL_RIG = "PHYSICAL RIG"
 
 class MeasurementResult(BaseModel):
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     actuator_position: float = Field(description="Actuator setting (e.g. angle in degrees, position in mm)")
     sensor_value: float = Field(description="Recorded sensor value (e.g. lux, volts, counts)")
     units_actuator: str = Field(default="degrees", description="Units for actuator position")
@@ -28,6 +35,12 @@ class BaseHardwareRig(ABC):
     Abstract Hardware Rig defining the standard interface for both physical
     microcontroller drivers and digital twin simulators.
     """
+
+    @property
+    @abstractmethod
+    def data_source(self) -> DataSource:
+        """Label for where this rig's measurements come from."""
+        pass
 
     @abstractmethod
     def connect(self) -> bool:

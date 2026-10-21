@@ -1,15 +1,20 @@
 """
-Lead Scientist / Planner Agent.
-Formulates scientific hypotheses, designs initial exploration plans,
-and reasons about experimental convergence.
+Lead Scientist / Planner Agent (heuristic).
+Formulates a testable, law-neutral hypothesis and an initial exploration design
+from the agent-facing experiment description only.
+
+Phase 2 adds an LLM planner; this heuristic remains as the no-LLM fallback.
 """
-import os
-import json
 import logging
-from typing import Dict, Any, List, Optional
+from typing import List
 from agents.models import Hypothesis, ExperimentStep
+from experiments.registry import AgentExperimentView
 
 logger = logging.getLogger(__name__)
+
+def default_question(view: AgentExperimentView) -> str:
+    """A neutral research question built from the variable names only."""
+    return f"How does the {view.dependent.name} depend on the {view.independent.name}?"
 
 class LeadScientistAgent:
     """
@@ -17,52 +22,31 @@ class LeadScientistAgent:
     Formulates scientific hypotheses and directs the experimental methodology.
     """
 
-    def __init__(self, model_name: str = "gpt-4o"):
-        self.model_name = model_name
-        self.api_key_available = bool(os.getenv("OPENAI_API_KEY") or os.getenv("ANTHROPIC_API_KEY") or os.getenv("GEMINI_API_KEY"))
+    def formulate_hypothesis(self, research_prompt: str, view: AgentExperimentView) -> Hypothesis:
+        """
+        Structures a testable hypothesis. No functional form is assumed: the law is
+        identified afterwards by blind model comparison.
+        """
+        indep, dep = view.independent, view.dependent
+        lo, hi = view.safe_bounds
+        return Hypothesis(
+            title=research_prompt.strip(),
+            statement=(
+                f"The {dep.name} ({dep.units}) varies systematically with the {indep.name} ({indep.units}) "
+                f"over the safe range [{lo:g}, {hi:g}] {indep.units}. No functional form is assumed in advance."
+            ),
+            target_relationship="To be identified from the data by blind model comparison",
+            independent_variable=f"{indep.name} ({indep.units})",
+            dependent_variable=f"{dep.name} ({dep.units})",
+            suggested_range=[lo, hi],
+        )
 
-    def formulate_hypothesis(self, research_prompt: str) -> Hypothesis:
+    def generate_initial_plan(self, view: AgentExperimentView, num_samples: int = 4) -> List[ExperimentStep]:
         """
-        Interprets a high-level scientific query and structures a testable hypothesis.
+        Generates initial exploratory anchor coordinates spanning the safe bounds.
         """
-        # If an LLM API key is present, we can call it for dynamic hypothesis generation
-        prompt_lower = research_prompt.lower()
-        if "polar" in prompt_lower or "angle" in prompt_lower or "malus" in prompt_lower:
-            return Hypothesis(
-                title="Investigation of Polarized Light Transmission via Malus's Law",
-                statement="The transmitted light intensity through a linear polarizer is directly proportional to the cosine-squared of the angle relative to the polarization axis of the incident beam.",
-                target_relationship="I(theta) = I_0 * cos^2(theta - theta_0) + I_ambient",
-                independent_variable="Polarizer Angle (theta)",
-                dependent_variable="Transmitted Light Intensity (I)",
-                suggested_range=[0.0, 180.0]
-            )
-        elif "distance" in prompt_lower or "inverse" in prompt_lower or "square" in prompt_lower:
-            return Hypothesis(
-                title="Investigation of Radiant Intensity Decay with Distance",
-                statement="The intensity of light radiating from a point source decreases inversely proportional to the square of the distance from the source.",
-                target_relationship="I(d) = I_0 / (d + d_0)^2 + I_ambient",
-                independent_variable="Distance (d)",
-                dependent_variable="Radiant Intensity (I)",
-                suggested_range=[5.0, 100.0]
-            )
-        else:
-            # Default to Malus's Law
-            return Hypothesis(
-                title="Optical Transmission Discovery Experiment",
-                statement=f"Investigation into the physical relationship underlying: '{research_prompt}'",
-                target_relationship="I(x) = f(x)",
-                independent_variable="Actuator Parameter (x)",
-                dependent_variable="Sensor Reading (y)",
-                suggested_range=[0.0, 180.0]
-            )
+        min_b, max_b = view.safe_bounds
 
-    def generate_initial_plan(self, hypothesis: Hypothesis, num_samples: int = 4) -> List[ExperimentStep]:
-        """
-        Generates initial exploratory anchor coordinates spanning the domain bounds.
-        """
-        min_b = hypothesis.suggested_range[0]
-        max_b = hypothesis.suggested_range[1]
-        
         anchors = [min_b, max_b]
         if num_samples >= 3:
             anchors.append(round((min_b + max_b) / 2.0, 1))
