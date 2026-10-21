@@ -1,15 +1,17 @@
 """
 Scientific Visualization Generator.
 Produces publication-quality figures showcasing experimental observations,
-physical curve fits, Bayesian surrogate uncertainty bounds, and residual analyses.
+the best-ranked model fit, Bayesian surrogate uncertainty bounds, and residuals.
 """
 from pathlib import Path
-from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import Optional
 import numpy as np
 import matplotlib
 matplotlib.use('Agg') # Non-interactive headless backend
 import matplotlib.pyplot as plt
+
+from analysis.model_library import MODEL_LIBRARY
+from records.run_record import RunRecord
 
 class ScienceVisualizer:
     """
@@ -17,32 +19,30 @@ class ScienceVisualizer:
     """
 
     def __init__(self, output_dir: Path):
-        self.output_dir = output_dir
+        self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def generate_discovery_figure(
         self,
-        X_data: List[float],
-        y_data: List[float],
-        experiment_type: str,
-        best_model_name: str,
-        optimal_params: Dict[str, float],
-        r2_score: float,
-        rmse: float,
+        record: RunRecord,
+        gp_grid: Optional[np.ndarray] = None,
         gp_mu: Optional[np.ndarray] = None,
-        gp_sigma: Optional[np.ndarray] = None,
-        gp_grid: Optional[np.ndarray] = None
+        gp_sigma: Optional[np.ndarray] = None
     ) -> Path:
         """
-        Creates a comprehensive 3-panel publication figure.
+        Creates a 3-panel figure: data + best fit, GP surrogate, residuals.
         """
-        X = np.array(X_data)
-        y = np.array(y_data)
-        
-        # Sort for smooth plotting
-        sort_idx = np.argsort(X)
-        X_sorted = X[sort_idx]
-        y_sorted = y[sort_idx]
+        x_list, y_list = record.measured_points()
+        X = np.array(x_list, dtype=float)
+        y = np.array(y_list, dtype=float)
+
+        view = record.experiment.agent_view
+        x_label = f"{view.independent.name} {view.independent.symbol} ({view.independent.units})"
+        y_label = f"{view.dependent.name} {view.dependent.symbol} ({view.dependent.units})"
+
+        analysis = record.result.final_analysis if record.result else None
+        best = analysis.best if analysis else None
+        model = MODEL_LIBRARY[best.key] if best else None
 
         fig = plt.figure(figsize=(15, 5), dpi=300)
         plt.style.use('seaborn-v0_8-whitegrid' if 'seaborn-v0_8-whitegrid' in plt.style.available else 'default')
@@ -53,36 +53,20 @@ class ScienceVisualizer:
         color_gp = "#2ca02c"  # Green
         color_ci = "#98df8a"  # Light green
 
-        x_label = "Polarizer Angle $\\theta$ (degrees)" if experiment_type == "malus_law" else "Distance $d$ (cm)"
-        y_label = "Transmitted Intensity $I$ (lux)"
-
         # -------------------------------------------------------------
-        # Panel 1: Physical Law Fit & Experimental Data
+        # Panel 1: Best model fit & experimental data
         # -------------------------------------------------------------
         ax1 = fig.add_subplot(1, 3, 1)
-        ax1.scatter(X, y, color=color_obs, s=45, alpha=0.85, edgecolors='k', zorder=5, label='Experimental Observations')
-
-        # High-resolution theoretical curve
-        x_dense = np.linspace(min(X), max(X), 300)
-        if experiment_type == "malus_law" and "I0" in optimal_params:
-            i0 = optimal_params.get("I0", 1000.0)
-            th0 = optimal_params.get("theta0", 0.0)
-            c = optimal_params.get("C", 0.0)
-            rad = np.radians(x_dense - th0)
-            y_fit = i0 * (np.cos(rad) ** 2) + c
-            eq_str = f"$I(\\theta) = {i0:.1f} \\cos^2(\\theta - {th0:.1f}^\\circ) + {c:.1f}$"
-        elif experiment_type == "inverse_square_law" and "I0" in optimal_params:
-            i0 = optimal_params.get("I0", 1000.0)
-            d0 = optimal_params.get("d0", 5.0)
-            c = optimal_params.get("C", 0.0)
-            y_fit = (i0 * 100.0) / ((x_dense + d0) ** 2) + c
-            eq_str = f"$I(d) = \\frac{{{i0:.1f} \\times 100}}{{(d + {d0:.1f})^2}} + {c:.1f}$"
+        ax1.scatter(X, y, color=color_obs, s=45, alpha=0.85, edgecolors='k', zorder=5, label='Measurements')
+        if model is not None and len(X):
+            x_dense = np.linspace(min(X), max(X), 300)
+            dbic = analysis.delta_bic_runner_up
+            dbic_text = f"ΔBIC to runner-up = {dbic:.1f}" if dbic is not None else "ΔBIC: n/a"
+            ax1.plot(x_dense, model.predict(x_dense, best.params), color=color_fit, linewidth=2.2,
+                     label=f'{best.name}\n{dbic_text}\n$R^2$ = {best.r2:.4f}, RMSE = {best.rmse:.2f}')
+            ax1.set_title(f"A. Best model by BIC: {best.name}", fontsize=11, fontweight='bold')
         else:
-            y_fit = np.poly1d(np.polyfit(X, y, 2))(x_dense)
-            eq_str = "Empirical Fit"
-
-        ax1.plot(x_dense, y_fit, color=color_fit, linewidth=2.2, label=f'Fitted Model\n$R^2 = {r2_score:.4f}$\nRMSE = {rmse:.2f}')
-        ax1.set_title(f"A. Physical Model: {best_model_name}", fontsize=11, fontweight='bold')
+            ax1.set_title("A. Measurements (no model fitted)", fontsize=11, fontweight='bold')
         ax1.set_xlabel(x_label, fontsize=10)
         ax1.set_ylabel(y_label, fontsize=10)
         ax1.legend(loc='best', fontsize=8, frameon=True)
@@ -112,31 +96,25 @@ class ScienceVisualizer:
             ax2.text(0.5, 0.5, "Surrogate model uninitialized", ha='center', va='center')
 
         # -------------------------------------------------------------
-        # Panel 3: Residual Analysis & Error Bounds
+        # Panel 3: Residuals of the best model
         # -------------------------------------------------------------
         ax3 = fig.add_subplot(1, 3, 3)
-        if experiment_type == "malus_law" and "I0" in optimal_params:
-            rad_obs = np.radians(X - optimal_params.get("theta0", 0.0))
-            y_pred_obs = optimal_params.get("I0", 1000.0) * (np.cos(rad_obs) ** 2) + optimal_params.get("C", 0.0)
-            residuals = y - y_pred_obs
-        elif experiment_type == "inverse_square_law" and "I0" in optimal_params:
-            y_pred_obs = (optimal_params.get("I0", 1000.0) * 100.0) / ((X + optimal_params.get("d0", 5.0)) ** 2) + optimal_params.get("C", 0.0)
-            residuals = y - y_pred_obs
+        if model is not None and len(X):
+            residuals = y - model.predict(X, best.params)
+            ax3.axhline(0, color='gray', linestyle='--', linewidth=1.2)
+            ax3.scatter(X, residuals, color="#9467bd", s=45, edgecolors='k', alpha=0.85)
         else:
-            residuals = y - np.mean(y)
-
-        ax3.axhline(0, color='gray', linestyle='--', linewidth=1.2)
-        ax3.scatter(X, residuals, color="#9467bd", s=45, edgecolors='k', alpha=0.85)
-        ax3.set_title("C. Residual Distribution $\\epsilon_i = y_i - \\hat{y}_i$", fontsize=11, fontweight='bold')
+            ax3.text(0.5, 0.5, "No model fitted", ha='center', va='center')
+        ax3.set_title("C. Residuals $\\epsilon_i = y_i - \\hat{y}_i$", fontsize=11, fontweight='bold')
         ax3.set_xlabel(x_label, fontsize=10)
-        ax3.set_ylabel("Residual Error (lux)", fontsize=10)
+        ax3.set_ylabel(f"Residual ({view.dependent.units})", fontsize=10)
         ax3.grid(True, linestyle='--', alpha=0.6)
 
+        fig.suptitle(f"Data source: {record.data_source.value}    |    run {record.run_id}",
+                     fontsize=10, fontweight='bold')
         plt.tight_layout()
-        
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        filename = f"discovery_plot_{experiment_type}_{timestamp}.png"
-        filepath = self.output_dir / filename
+
+        filepath = self.output_dir / f"discovery_plot_{record.run_id}.png"
         fig.savefig(filepath, dpi=300, bbox_inches='tight')
         plt.close(fig)
 

@@ -1,16 +1,19 @@
 """
 Hardware abstraction and digital twin package for AI Laboratory.
 """
-from hardware.base import BaseHardwareRig, MeasurementResult, RigStatus
+from hardware.base import BaseHardwareRig, DataSource, MeasurementResult, RigStatus
 from hardware.simulator import PhysicsSimulationRig
 from hardware.serial_driver import SerialHardwareRig
-from hardware.safety_guard import HardwareSafetyGuard
+from hardware.safety_guard import HardwareSafetyGuard, SafetyLimits, SafetyViolationError
 
 __all__ = [
     "BaseHardwareRig",
+    "DataSource",
     "MeasurementResult",
     "RigStatus",
     "PhysicsSimulationRig",
     "SerialHardwareRig",
     "HardwareSafetyGuard",
+    "SafetyLimits",
+    "SafetyViolationError",
 ]

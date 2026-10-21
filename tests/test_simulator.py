@@ -1,12 +1,31 @@
 """
 Unit tests for the Physics Simulation Rig (Digital Twin).
 """
+import math
+
+import numpy as np
 import pytest
-from config import SimulationConfig
+
+from config import HardwareConfig, SimulationConfig
+from experiments.registry import get_experiment
+from hardware.base import DataSource
+from hardware.serial_driver import SerialHardwareRig
 from hardware.simulator import PhysicsSimulationRig
 
+def make_rig(name: str, noise_std=0.0) -> PhysicsSimulationRig:
+    rig = PhysicsSimulationRig(
+        get_experiment(name), np.random.default_rng(0),
+        SimulationConfig(noise_std=noise_std, transit_delay_sec=0.0),
+    )
+    rig.connect()
+    return rig
+
+def read_at(rig: PhysicsSimulationRig, x: float) -> float:
+    rig.move_actuator(x)
+    return rig.read_sensor().sensor_value
+
 def test_simulator_connection_and_homing():
-    sim = PhysicsSimulationRig()
+    sim = PhysicsSimulationRig(get_experiment("malus_law"), np.random.default_rng(0))
     assert not sim.is_connected()
     assert sim.connect()
     assert sim.is_connected()
@@ -16,53 +35,41 @@ def test_simulator_connection_and_homing():
     assert status.current_position == 0.0
 
 def test_malus_law_intensity_profile():
-    config = SimulationConfig(
-        experiment_type="malus_law",
-        i0_intensity=1000.0,
-        theta_offset=0.0,
-        ambient_noise_level=10.0,
-        noise_std=0.0, # Zero noise for deterministic test
-        transit_delay_sec=0.0
-    )
-    sim = PhysicsSimulationRig(config)
-    sim.connect()
-
-    # 0 degrees: peak transmission (I0 + ambient = 1010)
-    sim.move_actuator(0.0)
-    res_0 = sim.read_sensor()
-    assert pytest.approx(res_0.sensor_value, abs=1e-3) == 1010.0
-
-    # 90 degrees: minimum transmission (ambient = 10)
-    sim.move_actuator(90.0)
-    res_90 = sim.read_sensor()
-    assert pytest.approx(res_90.sensor_value, abs=1e-3) == 10.0
-
-    # 45 degrees: half transmission (I0 * 0.5 + ambient = 510)
-    sim.move_actuator(45.0)
-    res_45 = sim.read_sensor()
-    assert pytest.approx(res_45.sensor_value, abs=1e-3) == 510.0
-
-    # 180 degrees: peak transmission again (1010)
-    sim.move_actuator(180.0)
-    res_180 = sim.read_sensor()
-    assert pytest.approx(res_180.sensor_value, abs=1e-3) == 1010.0
+    rig = make_rig("malus_law")
+    p = rig.spec.true_params
+    # Maximum at the polariser offset, minimum 90 degrees later, half way at 45 degrees
+    assert read_at(rig, p["x0"]) == pytest.approx(p["A"] + p["C"])
+    assert read_at(rig, p["x0"] + 90.0) == pytest.approx(p["C"])
+    assert read_at(rig, p["x0"] + 45.0) == pytest.approx(p["A"] / 2 + p["C"])
+    assert read_at(rig, 0.0) == pytest.approx(p["A"] * math.cos(math.radians(p["x0"])) ** 2 + p["C"])
 
 def test_inverse_square_law_profile():
-    config = SimulationConfig(
-        experiment_type="inverse_square_law",
-        i0_intensity=1000.0,
-        ambient_noise_level=5.0,
-        noise_std=0.0,
-        transit_delay_sec=0.0
-    )
-    sim = PhysicsSimulationRig(config)
-    sim.connect()
+    rig = make_rig("inverse_square_law")
+    p = rig.spec.true_params
+    near, far = read_at(rig, 5.0), read_at(rig, 20.0)
+    assert near > far
+    assert far == pytest.approx(p["A"] / (20.0 + p["x0"]) ** 2 + p["C"])
 
-    # Intensity at d1 < Intensity at d0
-    sim.move_actuator(5.0)
-    res_5 = sim.read_sensor()
+def test_beer_lambert_law_profile():
+    rig = make_rig("beer_lambert_law")
+    p = rig.spec.true_params
+    assert read_at(rig, 0.0) == pytest.approx(p["A"] + p["C"])
+    assert read_at(rig, 1.0 / p["k"]) == pytest.approx(p["A"] / math.e + p["C"])
 
-    sim.move_actuator(20.0)
-    res_20 = sim.read_sensor()
+def test_noise_level_uses_spec_default_unless_overridden():
+    spec = get_experiment("malus_law")
+    assert PhysicsSimulationRig(spec, np.random.default_rng(0)).noise_std == spec.noise.std
+    assert make_rig("malus_law", noise_std=3.0).noise_std == 3.0
 
-    assert res_5.sensor_value > res_20.sensor_value
+def test_measurements_carry_spec_units_and_no_ground_truth():
+    rig = make_rig("beer_lambert_law")
+    rig.move_actuator(10.0)
+    m = rig.read_sensor()
+    assert (m.units_actuator, m.units_sensor) == ("mg/L", "lux")
+    assert m.metadata == {"simulation": True}
+    assert "experiment" not in rig.get_status().telemetry
+
+def test_data_source_labels():
+    assert make_rig("malus_law").data_source == DataSource.DIGITAL_TWIN
+    assert SerialHardwareRig(HardwareConfig(port="/dev/ttyUSB0")).data_source == DataSource.PHYSICAL_RIG
+    assert SerialHardwareRig(HardwareConfig(port="rfc2217://localhost:4000")).data_source == DataSource.FIRMWARE_IN_THE_LOOP

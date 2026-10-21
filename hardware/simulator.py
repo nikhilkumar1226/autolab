@@ -1,28 +1,41 @@
 """
 Physics Simulation Rig (Digital Twin) for Autonomous Experimental Design.
-Provides high-fidelity mathematical and noise models for optical and physical phenomena.
+Evaluates the ground-truth law of an ExperimentSpec and adds seeded sensor noise.
 """
 import time
-import math
 import numpy as np
-from typing import Dict, Any, Optional
-from datetime import datetime
-from hardware.base import BaseHardwareRig, MeasurementResult, RigStatus
+from typing import Optional
+from datetime import datetime, timezone
+from hardware.base import BaseHardwareRig, DataSource, MeasurementResult, RigStatus
 from config import SimulationConfig
+from experiments.registry import ExperimentSpec
 
 class PhysicsSimulationRig(BaseHardwareRig):
     """
-    Simulates physical experiments with realistic sensor noise, ambient offsets,
+    Simulates an experiment from the registry with Gaussian sensor noise
     and mechanical transit behavior.
+
+    All noise is drawn from the `rng` passed in, so a run is reproducible from its seed.
     """
 
-    def __init__(self, sim_config: Optional[SimulationConfig] = None):
+    def __init__(self, spec: ExperimentSpec, rng: np.random.Generator, sim_config: Optional[SimulationConfig] = None):
+        self.spec = spec
         self.config = sim_config or SimulationConfig()
+        self._rng = rng
+        self._noise_std = self.config.noise_std if self.config.noise_std is not None else spec.noise.std
         self._connected = False
         self._is_homed = False
         self._current_position = 0.0
         self._is_busy = False
         self._sample_history = []
+
+    @property
+    def data_source(self) -> DataSource:
+        return DataSource.DIGITAL_TWIN
+
+    @property
+    def noise_std(self) -> float:
+        return self._noise_std
 
     def connect(self) -> bool:
         self._connected = True
@@ -51,47 +64,23 @@ class PhysicsSimulationRig(BaseHardwareRig):
         if not self._connected:
             raise ConnectionError("Cannot move actuator on disconnected rig.")
         self._is_busy = True
-        
+
         # Simulate mechanical transit delay proportional to step
         displacement = abs(position - self._current_position)
         if self.config.transit_delay_sec > 0 and displacement > 0:
             delay = min(0.2, self.config.transit_delay_sec * (displacement / 45.0 + 0.1))
             time.sleep(delay)
-            
+
         self._current_position = float(position)
         self._is_busy = False
         return True
 
     def _calculate_physical_intensity(self, position: float) -> float:
         """
-        Computes the theoretical physical response plus noise for the active experiment.
+        Ground-truth response plus Gaussian noise. A light sensor cannot read below zero.
         """
-        exp_type = self.config.experiment_type.lower()
-        noise = np.random.normal(0, self.config.noise_std)
-
-        if exp_type == "malus_law":
-            # Malus's Law: I = I_0 * cos^2(theta - theta_0) + I_ambient + noise
-            rad = math.radians(position - self.config.theta_offset)
-            intensity = self.config.i0_intensity * (math.cos(rad) ** 2) + self.config.ambient_noise_level + noise
-            return max(0.0, float(intensity))
-
-        elif exp_type == "inverse_square_law":
-            # Inverse Square Law: I = I_0 / (d + d_0)^2 + I_ambient + noise
-            # position is distance in cm (e.g. 5 to 100 cm)
-            d0 = 5.0 # offset distance in cm
-            d = max(1.0, position + d0)
-            intensity = (self.config.i0_intensity * 100.0) / (d ** 2) + self.config.ambient_noise_level + noise
-            return max(0.0, float(intensity))
-
-        elif exp_type == "beer_lambert_law":
-            # Beer-Lambert: I = I_0 * exp(-epsilon * c) + I_ambient + noise
-            # position represents concentration in mg/L (0 to 100)
-            epsilon = 0.04
-            intensity = self.config.i0_intensity * math.exp(-epsilon * position) + self.config.ambient_noise_level + noise
-            return max(0.0, float(intensity))
-
-        else:
-            raise ValueError(f"Unknown experiment type: {exp_type}")
+        noise = self._rng.normal(0.0, self._noise_std)
+        return max(0.0, self.spec.true_response(position) + float(noise))
 
     def read_sensor(self) -> MeasurementResult:
         if not self._connected:
@@ -99,21 +88,15 @@ class PhysicsSimulationRig(BaseHardwareRig):
 
         intensity = self._calculate_physical_intensity(self._current_position)
 
-        units_actuator = "degrees" if self.config.experiment_type == "malus_law" else "cm"
-        units_sensor = "lux"
-
+        # Metadata deliberately carries no ground truth and no experiment name.
         result = MeasurementResult(
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             actuator_position=self._current_position,
             sensor_value=intensity,
-            units_actuator=units_actuator,
-            units_sensor=units_sensor,
+            units_actuator=self.spec.independent.units,
+            units_sensor=self.spec.dependent.units,
             is_valid=True,
-            metadata={
-                "simulation": True,
-                "experiment_type": self.config.experiment_type,
-                "ground_truth_i0": self.config.i0_intensity,
-            }
+            metadata={"simulation": True}
         )
         self._sample_history.append(result)
         return result
@@ -127,6 +110,5 @@ class PhysicsSimulationRig(BaseHardwareRig):
             telemetry={
                 "samples_recorded": len(self._sample_history),
                 "mode": "simulation",
-                "experiment": self.config.experiment_type
             }
         )

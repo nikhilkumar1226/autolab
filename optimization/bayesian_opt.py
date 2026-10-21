@@ -3,9 +3,11 @@ Bayesian Optimization and Active Learning Engine.
 Selects statistically optimal measurement points using Gaussian Process surrogates
 and acquisition functions to discover physical laws with minimal experimental trials.
 """
+import warnings
 from enum import Enum
 import numpy as np
-from typing import List, Tuple, Optional, Dict, Any
+from typing import List, Tuple, Optional, Dict, Any, Sequence
+from sklearn.exceptions import ConvergenceWarning
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import RBF, ConstantKernel, WhiteKernel
 from scipy.stats import norm
@@ -20,22 +22,25 @@ class ActiveLearningEngine:
     Gaussian Process Active Learning agent for physical parameter discovery.
     """
 
-    def __init__(self, min_bound: float = 0.0, max_bound: float = 180.0, resolution: int = 300):
+    def __init__(self, min_bound: float = 0.0, max_bound: float = 180.0, resolution: int = 300, random_state: int = 42):
         self.min_bound = min_bound
         self.max_bound = max_bound
         self.resolution = resolution
         self.candidate_grid = np.linspace(min_bound, max_bound, resolution).reshape(-1, 1)
-        
-        # Kernel: Constant * RBF + WhiteKernel (accounting for sensor noise)
+
+        # Kernel: Constant * RBF + WhiteKernel (accounting for sensor noise).
+        # Length scales are relative to the search span (30 and [5, 180] for a 180-unit span).
+        span = max_bound - min_bound
         kernel = ConstantKernel(constant_value=500.0, constant_value_bounds=(1e-2, 1e6)) * \
-                 RBF(length_scale=30.0, length_scale_bounds=(5.0, 180.0)) + \
+                 RBF(length_scale=span / 6.0, length_scale_bounds=(span / 36.0, span)) + \
                  WhiteKernel(noise_level=10.0, noise_level_bounds=(1e-5, 1e4))
-                 
+
+        # random_state seeds the hyperparameter-optimizer restarts; the engine derives it from the run seed.
         self.gp = GaussianProcessRegressor(
             kernel=kernel,
             n_restarts_optimizer=5,
             normalize_y=True,
-            random_state=42
+            random_state=random_state
         )
         self.is_fitted = False
 
@@ -45,7 +50,10 @@ class ActiveLearningEngine:
         """
         if len(X.shape) == 1:
             X = X.reshape(-1, 1)
-        self.gp.fit(X, y)
+        with warnings.catch_warnings():
+            # Hyperparameters landing on a kernel bound is routine with few points.
+            warnings.simplefilter("ignore", ConvergenceWarning)
+            self.gp.fit(X, y)
         self.is_fitted = True
 
     def predict(self, X_grid: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
@@ -68,10 +76,13 @@ class ActiveLearningEngine:
         y_observed: np.ndarray,
         strategy: AcquisitionStrategy = AcquisitionStrategy.UNCERTAINTY,
         kappa: float = 1.96,
-        xi: float = 0.01
+        xi: float = 0.01,
+        exclude: Optional[Sequence[float]] = None
     ) -> Dict[str, Any]:
         """
         Computes acquisition function over candidate search space and returns optimal next coordinate.
+        Candidates close to an already measured point, or to a point in `exclude`
+        (e.g. one the safety guard rejected), are never proposed.
         """
         if len(X_observed.shape) == 1:
             X_observed = X_observed.reshape(-1, 1)
@@ -86,6 +97,12 @@ class ActiveLearningEngine:
             axis=1
         )
         mask_novelty = distances_to_observed > min_distance_threshold
+        if exclude:
+            distances_to_excluded = np.min(
+                np.abs(self.candidate_grid - np.asarray(exclude, dtype=float).reshape(1, -1)),
+                axis=1
+            )
+            mask_novelty &= distances_to_excluded > min_distance_threshold
 
         if strategy == AcquisitionStrategy.UNCERTAINTY:
             # Maximum predictive variance / standard deviation
