@@ -3,10 +3,12 @@ Hardware Safety Guard (The Nervous System).
 Hardcodes strict limits, bounds checking, and anomaly interceptors to protect physical rigs
 against AI hallucinations and erroneous tool calls.
 """
+import math
 import logging
-from typing import Optional, Dict, Any
+import numbers
+from typing import Dict, Any
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from hardware.base import BaseHardwareRig, MeasurementResult, RigStatus
-from config import HardwareConfig
 
 logger = logging.getLogger(__name__)
 
@@ -14,15 +16,29 @@ class SafetyViolationError(ValueError):
     """Raised when an agent requests an action outside safe physical bounds."""
     pass
 
+class SafetyLimits(BaseModel):
+    """Per-experiment actuator limits. Built from the ExperimentSpec, never from a global default."""
+    model_config = ConfigDict(frozen=True)
+
+    min_position: float
+    max_position: float
+    max_step_delta: float = Field(gt=0.0)
+
+    @model_validator(mode="after")
+    def _check_order(self) -> "SafetyLimits":
+        if not self.min_position < self.max_position:
+            raise ValueError("min_position must be below max_position")
+        return self
+
 class HardwareSafetyGuard:
     """
     Transparent safety wrapper around any BaseHardwareRig.
     Intercepts and validates every command before it reaches the physical or simulated rig.
     """
 
-    def __init__(self, rig: BaseHardwareRig, hw_config: Optional[HardwareConfig] = None):
+    def __init__(self, rig: BaseHardwareRig, limits: SafetyLimits):
         self.rig = rig
-        self.config = hw_config or HardwareConfig()
+        self.limits = limits
         self._emergency_stop_triggered = False
         self._execution_history = []
 
@@ -47,23 +63,33 @@ class HardwareSafetyGuard:
         if self._emergency_stop_triggered:
             raise SafetyViolationError("Rig is in Emergency Stop state. Intercepted movement request.")
 
+        # 0. Type check: NaN and inf would slip through the comparisons below
+        if (
+            isinstance(target_position, bool)
+            or not isinstance(target_position, numbers.Real)
+            or not math.isfinite(target_position)
+        ):
+            raise SafetyViolationError(
+                f"SAFETY INTERCEPT: Target position {target_position!r} is not a finite number."
+            )
+
         # 1. Bounds Check
-        if target_position < self.config.min_actuator_value or target_position > self.config.max_actuator_value:
+        if target_position < self.limits.min_position or target_position > self.limits.max_position:
             raise SafetyViolationError(
                 f"SAFETY INTERCEPT: Target position {target_position} exceeds physical limits "
-                f"[{self.config.min_actuator_value}, {self.config.max_actuator_value}]."
+                f"[{self.limits.min_position}, {self.limits.max_position}]."
             )
 
         # 2. Delta Check (Excessive rapid displacement)
         current_pos = self.rig.get_status().current_position
         displacement = abs(target_position - current_pos)
-        if displacement > self.config.max_step_delta:
+        if displacement > self.limits.max_step_delta:
             raise SafetyViolationError(
                 f"SAFETY INTERCEPT: Requested step displacement {displacement:.2f} exceeds "
-                f"maximum allowed delta {self.config.max_step_delta:.2f}."
+                f"maximum allowed delta {self.limits.max_step_delta:.2f}."
             )
 
-        return target_position
+        return float(target_position)
 
     def safe_move(self, target_position: float) -> Dict[str, Any]:
         """

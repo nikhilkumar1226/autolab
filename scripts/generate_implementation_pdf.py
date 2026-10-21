@@ -5,7 +5,7 @@ Generates an academic and technical summary PDF with embedded charts, tables, an
 import os
 import sys
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
@@ -161,7 +161,7 @@ def build_pdf():
     
     meta_data = [
         [Paragraph("<b>Status:</b> Complete & Validated (Digital Twin + Hardware Ready)", table_text_style),
-         Paragraph(f"<b>Date:</b> {datetime.utcnow().strftime('%B %d, %Y')}", table_text_style)],
+         Paragraph(f"<b>Date:</b> {datetime.now(timezone.utc).strftime('%B %d, %Y')}", table_text_style)],
         [Paragraph("<b>Architecture:</b> Multi-Agent Closed-Loop + Active Learning (GP)", table_text_style),
          Paragraph("<b>Supported Experiments:</b> Malus's Law & Inverse-Square Law", table_text_style)]
     ]

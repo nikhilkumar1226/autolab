@@ -1,11 +1,15 @@
 """
 Tool interface for agentic execution.
-Binds the hardware safety layer, active learning engine, and curve fitters into callable tools.
+Binds the hardware safety layer and the active learning engine into callable tools.
 """
-from typing import Dict, Any, List
+import logging
+from typing import List, Optional
 import numpy as np
-from hardware.safety_guard import HardwareSafetyGuard
+from hardware.safety_guard import HardwareSafetyGuard, SafetyViolationError
 from optimization.bayesian_opt import ActiveLearningEngine, AcquisitionStrategy
+from agents.models import ExecutionOutcome, GPCurve, GPSuggestion
+
+logger = logging.getLogger(__name__)
 
 class LabTools:
     """
@@ -17,77 +21,66 @@ class LabTools:
         self.optimizer = optimizer
         self.history_x: List[float] = []
         self.history_y: List[float] = []
+        # Positions the safety guard refused; the GP will not propose them again.
+        self.rejected_positions: List[float] = []
 
-    def tool_move_actuator(self, position: float) -> Dict[str, Any]:
+    def tool_take_measurement(self, position: float) -> ExecutionOutcome:
         """
-        Moves the physical or simulated actuator to a designated target with safety checks.
+        Compound tool: moves to the target through the safety guard and records the sensor reading.
+        A safety rejection is reported back as an outcome, never retried here.
         """
         try:
-            res = self.safety_guard.safe_move(position)
-            return {"status": "SUCCESS", "position": res["new_position"]}
-        except Exception as e:
-            return {"status": "ERROR", "message": str(e)}
-
-    def tool_read_sensor(self) -> Dict[str, Any]:
-        """
-        Reads the sensor telemetry at the current position.
-        """
-        try:
+            move = self.safety_guard.safe_move(position)
+            if not move["success"]:
+                return ExecutionOutcome(status="error", requested_position=position, message="actuator reported a failed move")
             measurement = self.safety_guard.safe_read()
-            return {
-                "status": "SUCCESS",
-                "position": measurement.actuator_position,
-                "sensor_value": round(measurement.sensor_value, 4),
-                "units": measurement.units_sensor,
-                "valid": measurement.is_valid
-            }
+        except SafetyViolationError as e:
+            self.rejected_positions.append(position)
+            return ExecutionOutcome(status="rejected", requested_position=position, message=str(e))
         except Exception as e:
-            return {"status": "ERROR", "message": str(e)}
+            return ExecutionOutcome(status="error", requested_position=position, message=f"{type(e).__name__}: {e}")
 
-    def tool_take_measurement(self, position: float) -> Dict[str, Any]:
-        """
-        Compound tool: Moves to the target position, lets the system settle, and records sensor data.
-        """
-        move_res = self.tool_move_actuator(position)
-        if move_res["status"] == "ERROR":
-            return move_res
+        if not measurement.is_valid:
+            return ExecutionOutcome(
+                status="error", requested_position=position, position=measurement.actuator_position,
+                message="sensor reading flagged invalid by the safety guard",
+            )
 
-        read_res = self.tool_read_sensor()
-        if read_res["status"] == "ERROR":
-            return read_res
+        self.history_x.append(measurement.actuator_position)
+        self.history_y.append(measurement.sensor_value)
+        return ExecutionOutcome(
+            status="measured",
+            requested_position=position,
+            position=measurement.actuator_position,
+            value=measurement.sensor_value,
+        )
 
-        pos = read_res["position"]
-        val = read_res["sensor_value"]
-
-        self.history_x.append(pos)
-        self.history_y.append(val)
-
-        return {
-            "status": "SUCCESS",
-            "position": pos,
-            "sensor_value": val,
-            "total_samples": len(self.history_x)
-        }
-
-    def tool_suggest_next_point(self, strategy: str = "uncertainty") -> Dict[str, Any]:
+    def tool_suggest_next_point(self, strategy: str = "uncertainty") -> GPSuggestion:
         """
         Invokes Bayesian Optimization / Active Learning to calculate the most statistically
         informative next parameter coordinate.
         """
         if len(self.history_x) < 2:
-            # Not enough points for GP, propose equidistant or random
-            span = self.safety_guard.config.max_actuator_value - self.safety_guard.config.min_actuator_value
-            mid = self.safety_guard.config.min_actuator_value + span / 2.0
-            return {
-                "status": "SUCCESS",
-                "suggested_position": round(mid, 2),
-                "strategy": "initial_midpoint",
-                "mean_sigma": 1.0
-            }
+            # Not enough points for a GP: propose the midpoint of the search space
+            mid = (self.optimizer.min_bound + self.optimizer.max_bound) / 2.0
+            return GPSuggestion(position=round(mid, 2), strategy="initial_midpoint", max_sigma=1.0, mean_sigma=1.0)
 
         strat = AcquisitionStrategy(strategy) if strategy in [s.value for s in AcquisitionStrategy] else AcquisitionStrategy.UNCERTAINTY
-        X_arr = np.array(self.history_x)
-        y_arr = np.array(self.history_y)
+        suggestion = self.optimizer.suggest_next_sample(
+            np.array(self.history_x), np.array(self.history_y), strategy=strat, exclude=self.rejected_positions
+        )
+        return GPSuggestion(
+            position=suggestion["suggested_position"],
+            strategy=suggestion["strategy"],
+            max_sigma=suggestion["max_sigma"],
+            mean_sigma=suggestion["mean_sigma"],
+            acquisition_score=suggestion["acquisition_score"],
+        )
 
-        suggestion = self.optimizer.suggest_next_sample(X_arr, y_arr, strategy=strat)
-        return {"status": "SUCCESS", **suggestion}
+    def gp_curve(self, n_points: int = 50) -> Optional[GPCurve]:
+        """Current GP posterior on a coarse grid (None before the GP is fitted)."""
+        if not self.optimizer.is_fitted:
+            return None
+        grid = np.linspace(self.optimizer.min_bound, self.optimizer.max_bound, n_points)
+        mu, sigma = self.optimizer.predict(grid)
+        return GPCurve(x=grid.tolist(), mean=mu.tolist(), std=sigma.tolist())
