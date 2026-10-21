@@ -86,11 +86,18 @@ class ConsoleEventPrinter:
         c = e.stop_check
         dbic = f"{c.delta_bic.value:.1f}" if c.delta_bic.value is not None else "n/a"
         rse = f"{c.max_rel_se.value:.1%}" if c.max_rel_se.value is not None else "n/a"
-        self.console.print(
+        line = (
             f"           best: [bold]{best.name}[/bold] | ΔBIC {dbic} (≥{c.delta_bic.threshold:g}) {_mark(c.delta_bic)}"
             f" | max rel SE {rse} (<{c.max_rel_se.threshold:.0%}) {_mark(c.max_rel_se)}"
             f" | n {e.analysis.n_points} (≥{c.min_points.threshold:.0f}) {_mark(c.min_points)}"
         )
+        if c.stable_best is not None:
+            streak = f"{c.stable_best.value:.0f}" if c.stable_best.value is not None else "0"
+            line += f" | stable {streak}/{c.stable_best.threshold:.0f} {_mark(c.stable_best)}"
+        if c.prediction is not None:
+            z = f"{c.prediction.value:.1f}σ" if c.prediction.value is not None else "n/a"
+            line += f" | new point {z} (≤{c.prediction.threshold:g}σ) {_mark(c.prediction)}"
+        self.console.print(line)
 
     def _on_stopped(self, e: RunStopped) -> None:
         d = e.decision

@@ -20,9 +20,25 @@ Every number and figure is exported to `results/`. Those files are the source fo
 - **Commit often.** Git commits are save points. If something breaks, you can go back.
 - **After each phase,** push to GitHub and tell me in the claude.ai chat. I'll review the code before you start the next phase.
 
+### Phase checkpoint (run at the end of EVERY phase)
+
+When a phase looks finished, paste this into the same Claude Code conversation (replace N and the title):
+```
+Phase checkpoint for Phase N (<title>):
+1. Run pytest -q and show me the result. If anything fails, fix it first.
+2. Go through the "Done when" list for Phase N in ROADMAP.md one by one, run the
+   commands, and tell me honestly which items pass and which don't.
+3. Add a docs/CHANGELOG.md entry: what changed, why, how it was verified.
+4. Make sure .env, API keys and runs/ junk are not staged (git status).
+5. Commit with the message "Phase N: <title>", create the git tag phase-N, and push
+   (git push && git push --tags).
+6. Tick the "Done when" boxes for Phase N in ROADMAP.md and commit that too.
+```
+Only start the next phase after this succeeds. The tag `phase-N` is a save point: if a later phase breaks everything, you can go back to it.
+
 ---
 
-## Phase 0 — Setup and cleanup
+## Phase 0 — Setup and cleanup ✅ DONE
 
 **Goal:** a clean, version-controlled project that runs.
 
@@ -37,7 +53,7 @@ Do this yourself (not via Claude):
 
 ---
 
-## Phase 1 — Foundation refactor
+## Phase 1 — Foundation refactor ✅ DONE (run the check below)
 
 **Why:** the dashboard, the benchmark and the LLM agents all need the same foundations: experiments described as data, every run recorded, live events, and no hidden hints to the Analyst.
 
@@ -76,10 +92,55 @@ Write a docs/CHANGELOG.md entry. Commit when pytest passes.
 ```
 
 **Done when:**
-- [ ] `pytest -q` passes.
-- [ ] `python main.py --experiment beer_lambert_law` identifies **exponential decay** (it used to say quadratic).
-- [ ] Runs stop at different numbers of points, not always 8.
-- [ ] A JSON file appears in `runs/` for every run.
+- [x] `pytest -q` passes.
+- [x] `python main.py --experiment beer_lambert_law` identifies **exponential decay** (it used to say quadratic).
+- [x] Runs stop at different numbers of points, not always 8. (Caveat: Malus always stops at exactly 8, the new `min_points` floor; see docs/CHANGELOG.md.)
+- [x] A JSON file appears in `runs/` for every run.
+
+### Phase 1 review (done by Claude on Oct 22) and one fix before Phase 2
+
+Review result: **Phase 1 passes.** 80/80 tests pass, Beer-Lambert is now identified as exponential, runs stop at different point counts, every run writes `runs/*.json`, and no keys are in git history. One problem, found by the team's own sweep: inverse-square runs sometimes stop early on the wrong law (14/20 correct), because 5 points leave a 3-parameter model only 2 residual degrees of freedom.
+
+**Fix prompt** (new conversation, Plan mode):
+```
+Read CLAUDE.md, ROADMAP.md and docs/CHANGELOG.md (Phase 1 "Known limitations").
+Fix the inverse-square false-convergence problem WITHOUT just raising the fixed floor:
+1. Add a "predictive stability" criterion to analysis/stopping.py: before each new
+   measurement is added, predict it with the current best model; after adding it, the
+   run may converge only if (a) the same model was best in the last 2 analyses with
+   delta-BIC >= 6 both times, and (b) the new point was predicted within 3 sigma
+   (sigma = residual std of the fit, floored at a robust noise estimate). Keep
+   min_points=5 and the budget. Make it configurable; record its value, threshold and
+   pass/fail in the stop decision like the other criteria.
+2. Re-run the Phase 1 seeded sweep (seeds 0-19 x 3 experiments) for three configs:
+   (A) current, (B) min_points=8, (C) new stability rule. Save
+   results/phase1_stopping_sweep.csv and print a table per config: correct-law count,
+   median/max measurements, stop reasons.
+3. Choose as default the config with >= 19/20 correct on every experiment and the
+   fewest median measurements. Explain the choice with the numbers in CHANGELOG.
+4. Add tests for the new criterion.
+Then stop and summarise; I will run the Phase checkpoint for Phase 1.
+```
+Then run the **Phase checkpoint for Phase 1**. It creates the `phase-1` tag (there are no tags yet). Send me the sweep table.
+
+---
+
+## Piyush's version: what we take, what we don't
+
+Piyush's copy (`AI-Laboratory`) has useful pieces. We **port the ideas** into our code instead of merging his code.
+
+Setup (you):
+1. Make a folder `reference/` inside `autolab` and put Piyush's `AI-Laboratory` folder in it.
+2. **Delete `reference/AI-Laboratory/.env`** (it contains his API key) and `reference/AI-Laboratory/.git`.
+3. Add the lines `reference/` and `llm_cache/` to `.gitignore`, so they never go to GitHub.
+
+| Take (Phase 2 / 3) | Never take |
+|---|---|
+| `CandidateModelSpec` idea (agent-proposed candidate models) | `ground_truth_simulation_formula`: the LLM must never write the simulator's physics |
+| AST-validated formula compiler (`compile_safe_model_callable`), tightened to a whitelist of numpy functions | Orchestrator code that copies `hypothesis.suggested_range` into the safety-guard limits |
+| litellm JSON-mode call pattern + the mocked-LLM test style (`patch("litellm.completion")`) | `eval(...)` of formulas in `hardware/simulator.py` |
+| Hooke's law and Stefan-Boltzmann as extra experiments (with fixed, hidden ground truth) | Keyword "semantic engine" as the main planner (fine only as the `none` fallback) |
+| `--model` CLI flag, timezone-aware datetimes | |
 
 ---
 
@@ -87,21 +148,29 @@ Write a docs/CHANGELOG.md entry. Commit when pytest passes.
 
 **Why:** the project title says "LLM agents", but the original code never called an LLM. An examiner who asks "show me the prompt" must see a real one, along with the reasoning it produced.
 
-**Before this phase:** get an API key (see "API keys" at the end). You can build the whole phase with `LLM_PROVIDER=mock` and only switch to the real model to try it.
+**Before this phase:** put your Claude API key and the Gemini key in `.env` (see "API keys" at the end) and set up `reference/` (section above). You can build the whole phase with `LLM_PROVIDER=mock` and only switch to the real model to try it.
 
 **Prompt:**
 ```
-Read CLAUDE.md and ROADMAP.md (Phase 2). Plan and implement real LLM agents for AutoLab.
+Read CLAUDE.md and ROADMAP.md (Phase 2, and the section "Piyush's version").
+Plan and implement real LLM agents for AutoLab. Use reference/AI-Laboratory as READ-ONLY
+inspiration for the "Take" column (CandidateModelSpec, the AST-validated compiler, the
+litellm JSON call, mocked-litellm tests). Do NOT copy anything from the "Never take"
+column. Never let the LLM change safety bounds or the simulator's ground truth.
 
 1. llm/client.py: LLMClient with complete_json(system, user, schema: type[BaseModel]) that
    returns a validated Pydantic object. Providers selected by LLM_PROVIDER env var:
    - "litellm": real call via litellm using LLM_MODEL; JSON-mode / structured output;
      retry up to 2 times on invalid JSON, feeding the validation error back; timeout.
-     FREE-TIER SAFE: on HTTP 429 (rate limit) back off with jitter and retry; support a
-     fallback chain from LLM_FALLBACKS (e.g. groq -> gemini -> ollama) via litellm
-     fallbacks; cache identical prompts on disk (llm_cache/) so re-runs cost no quota;
-     keep prompts compact (free tiers allow ~8,000 tokens per minute); record which
-     model actually answered each call.
+     PROVIDER PRIORITY: LLM_MODEL first (Claude, e.g. anthropic/claude-haiku-5-5), then
+     the comma-separated LLM_FALLBACKS in order (Gemini: gemini/gemini-3.6-flash, then
+     gemini/gemini-3.5-flash-lite). Fall back on auth errors, "credit balance too low",
+     rate limits (HTTP 429, back off with jitter first), timeouts and 5xx. Never fall
+     back silently to mock in a real run: if every model fails, stop the run with a clear
+     error. Record which model actually answered each call. Cache identical prompts on
+     disk (llm_cache/, git-ignored) so re-runs cost nothing; keep prompts compact.
+     Add `python -m llm.check` that sends one tiny request to every configured model
+     and prints OK / error per model (to test keys).
    - "mock": deterministic, offline, plausible responses for every agent schema.
    - "none": raises NotAvailable so agents fall back to heuristics (ablation baseline).
    Log every call into the run record: agent, prompt, raw response, parsed result,
@@ -126,13 +195,16 @@ Read CLAUDE.md and ROADMAP.md (Phase 2). Plan and implement real LLM agents for 
 6. Writer agent: writes the discussion/conclusion section of the generated report from
    the run record (no invented numbers: pass the numbers in, and tell it to use only those).
 7. CLI flags: --provider {litellm,mock,none} --model <name> --seed <int> --blind.
-8. Tests with the mock provider only: schemas validate, the sympy whitelist rejects
-   dangerous input (e.g. "__import__('os')"), safety rejection is fed back,
-   provider=none runs end to end.
-Update CHANGELOG. Commit when pytest passes.
+8. Tests with the mock provider only: schemas validate, the formula whitelist rejects
+   dangerous input (e.g. "__import__('os')", "np.load('x')", "().__class__"), safety
+   rejection is fed back, an LLM-proposed range outside the safety bounds is clipped and
+   logged (never applied to the guard), the fallback chain moves to the next model when
+   the first raises an error (mock litellm), provider=none runs end to end.
+When done, stop and summarise what you built; I will then run the Phase checkpoint.
 ```
 
 **Done when:**
+- [ ] `python -m llm.check` shows which keys work (Claude, Gemini).
 - [ ] `python main.py --provider mock` works with no key.
 - [ ] With a real key, `python main.py --provider litellm` works, and the run JSON shows the real prompts, responses, tokens and cost.
 - [ ] `--provider none` still works (this is your "no LLM" baseline).
@@ -156,6 +228,8 @@ Read CLAUDE.md and ROADMAP.md (Phase 3). Upgrade the digital twin (hardware/simu
    - diode_iv: diode current vs forward voltage (Shockley, exponential), V in volts, with
      a current-limit safety bound
    - ldr_response: LDR resistance vs illuminance (power law R = A * E^-gamma)
+   - hookes_law and stefan_boltzmann (ideas from reference/AI-Laboratory), with FIXED
+     ground truth in the registry, never written by an LLM
    Make sure the model library can represent each (add saturating-exponential and the
    Shockley form if needed). Agent-facing descriptions must NOT reveal the law.
 3. Fault injection: a FaultSchedule in config, e.g. [{"type":"light_spike","at_step":6},
@@ -167,7 +241,7 @@ Read CLAUDE.md and ROADMAP.md (Phase 3). Upgrade the digital twin (hardware/simu
    detected/recovered/missed per fault in the run record.
 5. Tests for every non-ideality and fault type, and for blind identification of the 3 new
    laws with the mock/none provider.
-Update CHANGELOG. Commit when pytest passes.
+When done, stop and summarise what you built; I will then run the Phase checkpoint.
 ```
 
 **Done when:**
@@ -200,7 +274,7 @@ Read CLAUDE.md and ROADMAP.md (Phase 4). Harden and prove the safety layer.
 4. Map safety features to standards in docs/safety_and_standards.md: IEC 61010-1
    (lab equipment safety), IEC 61508 (functional safety concepts: fail-safe, watchdog,
    E-stop), ISO/IEC 27001 (secrets handling), ISO/IEC 30141 (IoT reference architecture).
-Update CHANGELOG. Commit when pytest passes.
+When done, stop and summarise what you built; I will then run the Phase checkpoint.
 ```
 
 **Done when:**
@@ -235,7 +309,7 @@ Outputs:
   description of each figure.
 CLI: python -m benchmark.run --quick (2 seeds, mock) and --full. Resume-safe (skip
 completed runs). Tests for the metrics on a tiny config.
-Update CHANGELOG. Commit when pytest passes.
+When done, stop and summarise what you built; I will then run the Phase checkpoint.
 ```
 
 **Done when:**
@@ -269,7 +343,7 @@ Read CLAUDE.md and ROADMAP.md (Phase 6). Upgrade firmware/ and connect it via Wo
 4. A short guide docs/wokwi.md: how to start the simulation and run
    `python main.py --hardware --port rfc2217://localhost:4000 --provider mock`.
 5. Firmware protocol tests in Python against a fake serial port.
-Update CHANGELOG. Commit when pytest passes.
+When done, stop and summarise what you built; I will then run the Phase checkpoint.
 ```
 
 **Done when:**
@@ -297,7 +371,8 @@ Public-demo protections: if no API key or the visitor hasn't entered the APP_PAS
 secrets, force provider=mock and say so; cap measurements and runs per session.
 Clean, professional look (consistent theme, no emoji clutter). Keep logic out of the UI
 files: the app only calls the engine and reads results.
-Update CHANGELOG. Commit when it works with `streamlit run app/Home.py`.
+When it works with `streamlit run app/Home.py`, stop and summarise; I will then run the
+Phase checkpoint.
 ```
 
 **Done when:**
@@ -312,9 +387,9 @@ Update CHANGELOG. Commit when it works with `streamlit run app/Home.py`.
 2. Under **Advanced settings → Secrets**, paste:
    ```
    LLM_PROVIDER = "litellm"
-   LLM_MODEL = "groq/openai/gpt-oss-120b"
-   LLM_FALLBACKS = "gemini/gemini-3.5-flash-lite"
-   GROQ_API_KEY = "gsk_..."
+   LLM_MODEL = "anthropic/claude-haiku-5-5"
+   LLM_FALLBACKS = "gemini/gemini-3.6-flash,gemini/gemini-3.5-flash-lite"
+   ANTHROPIC_API_KEY = "sk-ant-..."
    GEMINI_API_KEY = "..."
    APP_PASSWORD = "choose-something"
    ```
@@ -327,7 +402,8 @@ pin requirements, read secrets via st.secrets falling back to .env, make sure no
 a serial port or local files that aren't in the repo, include a small set of demo runs in
 runs/demo/ for the Run History page. Add a GitHub Actions workflow that runs pytest (mock
 provider) on every push and a status badge in README. Rewrite README.md to match the
-current system (with a screenshot placeholder and the live demo link). Commit.
+current system (with a screenshot placeholder and the live demo link). Then I will run the
+Phase checkpoint.
 ```
 
 **Done when:**
@@ -351,13 +427,27 @@ current system (with a screenshot placeholder and the live demo link). Commit.
 
 ---
 
-## API keys (beginner guide, free options only)
+## API keys (beginner guide): Claude first, Gemini second
 
-- **What it is:** a password that lets AutoLab call an LLM over the internet. Your Claude Pro subscription runs Claude Code in VS Code; it does **not** give AutoLab an API. So AutoLab uses free APIs.
-- **Main: Groq (free, no card).** Go to console.groq.com, sign in with Google/GitHub, open **API Keys → Create API Key**, and paste it into `.env` as `GROQ_API_KEY=...`. Set `LLM_PROVIDER=litellm` and `LLM_MODEL=groq/openai/gpt-oss-120b`. The free limits (as of Oct 2026) are about 30 requests/min, 1,000 requests/day, 8,000 tokens/min and 200,000 tokens/day per model. **Tokens per day is the real limit**, roughly 100 calls a day per model. `openai/gpt-oss-20b` and `qwen/qwen3.8-27b` have their own separate limits, so you can use them as extra quota.
-- **Backup: Google AI Studio (Gemini, free).** Go to aistudio.google.com, open **Get API key**, and paste it into `.env` as `GEMINI_API_KEY=...`. Use a Flash-Lite model, which developers report allows about 500 requests/day; Flash allows only about 20/day. Free-tier prompts may be used by Google for training, which is fine for physics data, but never send personal data.
-- **Unlimited, offline: Ollama on your laptop.** Install it from ollama.com, then run `ollama pull gpt-oss:20b` (needs about 16 GB RAM; on 8 GB use a smaller model such as `qwen3:8b`). Set `LLM_MODEL=ollama/gpt-oss:20b`. It's free with no limits, so use it for the big benchmark runs. It can't run on the hosted dashboard.
-- **Plan:** `mock` for development and tests → Groq for real runs and the hosted demo → Gemini as automatic fallback → Ollama for bulk benchmark runs overnight. This also gives the paper a "cloud vs. local model" comparison.
-- **Don't bother with:** GitHub Models (shut down July 2026; old tutorials still mention it), or OpenRouter free (only 50 requests/day without buying credit).
-- **Never** paste a key into a chat, a screenshot, a commit, or the code. If a key leaks, delete it and create a new one.
-- Free limits change often. If you see "429 Too Many Requests", you've hit the limit for now; the fallback chain and cache handle it.
+**Order the app tries:** Claude (`anthropic/claude-haiku-5-5`), then Gemini Flash (`gemini/gemini-3.6-flash`), then Gemini Flash-Lite (`gemini/gemini-3.5-flash-lite`). If one fails (no credit, limit reached, server down), the next one answers automatically, and the run record shows which model answered each call.
+
+**1. Claude API key (Anthropic Console)**
+- Your **Claude Pro subscription does not include API usage.** Pro covers claude.ai and Claude Code in VS Code. The API is billed separately, from prepaid credit in the Anthropic Console.
+- Go to **console.anthropic.com** and sign up. You can use the same email; it's a separate account area. Some new accounts have reportedly received a small one-time free credit, but don't count on it.
+- **Settings → Billing:** if there's no free credit, the key won't work until you add credit (the minimum is small). Set a **monthly spend limit** so you can never be over-charged.
+- **API Keys → Create Key**, name it `autolab`, copy it (it's shown only once), and paste it into `.env` as `ANTHROPIC_API_KEY=sk-ant-...`.
+- `claude-haiku-5-5` is the cheapest current Claude model and is enough for every agent. Check the **Usage** page after your first few runs.
+- **If you don't add credit:** that's fine. Claude calls fail, and Gemini answers instead. The app still works.
+
+**2. Gemini key (Piyush's)**
+- His key was shared inside a zip, so ask him to **create a fresh key** in aistudio.google.com (**Get API key**) and delete the old one. He should send it to you privately, never in GitHub or a group chat.
+- Paste it into `.env` as `GEMINI_API_KEY=...`.
+- Free limits are small: developers report about 20 requests/day on Flash and about 500/day on Flash-Lite. That's why both are in the chain.
+
+**3. Test the keys** (after Phase 2): `python -m llm.check` prints OK or error for each model.
+
+**Rules**
+- Keys go only in `.env` (local) or Streamlit **Secrets** (hosted). Never in code, chats, screenshots or commits.
+- Use `LLM_PROVIDER=mock` for development and tests; switch to `litellm` only for real runs.
+- The big benchmark (Phase 5) makes many calls. Run LLM methods with few seeds (default 5) to save credit and quota.
+- Optional extra free backup: a Groq key (`groq/openai/gpt-oss-120b`) or local Ollama can be added at the end of `LLM_FALLBACKS`.

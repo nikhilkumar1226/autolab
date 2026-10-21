@@ -46,6 +46,19 @@ def parse_args():
         help=f"Max relative standard error per parameter to stop (default: {StoppingConfig().max_rel_se})"
     )
     parser.add_argument(
+        "--min-points",
+        type=int,
+        default=StoppingConfig().min_points,
+        help=f"Never stop on evidence with fewer measurements than this (default: {StoppingConfig().min_points})"
+    )
+    parser.add_argument(
+        "--stability",
+        action=argparse.BooleanOptionalAction,
+        default=StoppingConfig().predictive_stability,
+        help="Require the same best model in consecutive analyses and a correctly predicted newest point "
+             f"(default: {'on' if StoppingConfig().predictive_stability else 'off'})"
+    )
+    parser.add_argument(
         "--sampler",
         choices=["gp", "random"],
         default="gp",
@@ -88,7 +101,12 @@ def main():
             baud_rate=args.baud,
         ),
         agent=AgentConfig(sampler=args.sampler),
-        stopping=StoppingConfig(max_measurements=args.budget, max_rel_se=args.rse_threshold),
+        stopping=StoppingConfig(
+            max_measurements=args.budget,
+            max_rel_se=args.rse_threshold,
+            min_points=args.min_points,
+            predictive_stability=args.stability,
+        ),
         output=OutputConfig(write_report=not args.no_report),
     )
 
@@ -101,6 +119,10 @@ def main():
         rerun += f" --budget {args.budget}"
     if args.rse_threshold != StoppingConfig().max_rel_se:
         rerun += f" --rse-threshold {args.rse_threshold}"
+    if args.min_points != StoppingConfig().min_points:
+        rerun += f" --min-points {args.min_points}"
+    if args.stability != StoppingConfig().predictive_stability:
+        rerun += " --stability" if args.stability else " --no-stability"
     if args.sampler != "gp":
         rerun += f" --sampler {args.sampler}"
     printer.console.print(f"\n[bold]Done.[/bold] Reproduce this run with: [cyan]{rerun}[/cyan]")

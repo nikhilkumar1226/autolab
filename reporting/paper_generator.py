@@ -33,12 +33,29 @@ def _sampler_text(record: RunRecord) -> str:
 def _criteria(stop: StopDecision) -> List[tuple]:
     def row(label: str, c: CriterionCheck, value: str, threshold: str) -> tuple:
         return label, value, threshold, "yes" if c.passed else "no", c.detail
-    return [
+    rows = [
         row("Delta-BIC to runner-up", stop.delta_bic, _fmt(stop.delta_bic.value, ".2f"), f">= {stop.delta_bic.threshold:g}"),
         row("Max relative SE (best model)", stop.max_rel_se, _pct(stop.max_rel_se.value), f"< {stop.max_rel_se.threshold:.0%}"),
         row("Measurements", stop.min_points, _fmt(stop.min_points.value, ".0f"), f">= {stop.min_points.threshold:.0f}"),
-        row("Budget remaining", stop.budget, _fmt(stop.budget.value, ".0f"), f"< {stop.budget.threshold:.0f}"),
     ]
+    if stop.stable_best is not None:
+        rows.append(row("Consecutive analyses with the same best model", stop.stable_best,
+                        _fmt(stop.stable_best.value, ".0f"), f">= {stop.stable_best.threshold:.0f}"))
+    if stop.prediction is not None:
+        rows.append(row("Newest point vs. earlier prediction (sigma)", stop.prediction,
+                        _fmt(stop.prediction.value, ".2f"), f"<= {stop.prediction.threshold:g}"))
+    rows.append(row("Budget remaining", stop.budget, _fmt(stop.budget.value, ".0f"), f"< {stop.budget.threshold:.0f}"))
+    return rows
+
+def _stability_text(stopping) -> str:
+    if not stopping.predictive_stability:
+        return ""
+    return (
+        f" The same model must also have been best, by ΔBIC ≥ {stopping.delta_bic_threshold:g}, in the last "
+        f"{stopping.stability_window} analyses, and the fit made before the newest measurement must have predicted it "
+        f"within {stopping.prediction_max_z:g}σ, where σ is that fit's residual standard deviation sqrt(SSR/(n − k)), "
+        f"floored at {stopping.noise_floor_rel:.1%} of the measured y-span (an assumed instrument resolution)."
+    )
 
 def _summary_sentence(record: RunRecord, analysis: Optional[AnalysisResult]) -> str:
     n = record.result.n_measurements if record.result else 0
@@ -136,7 +153,7 @@ class SciencePaperGenerator:
 - **Dependent variable (y):** {view.dependent.name} ({view.dependent.units})
 - **Sampling:** an initial design of {record.config.agent.initial_sample_count} points across the safe range, then {_sampler_text(record)}. Every position passed through the hardware safety guard.
 - **Blind analysis:** the analyst saw only the measured (x, y) pairs, not the experiment or its true law. It fitted every model in a fixed library of candidates by nonlinear least squares and ranked them by the Bayesian Information Criterion, BIC = n ln(SSR/n) + k ln n.
-- **Stopping rule:** stop when the best model beats the runner-up by ΔBIC ≥ {stopping.delta_bic_threshold:g}, every parameter's relative standard error is below {stopping.max_rel_se:.0%}, and at least {stopping.min_points} points exist; otherwise stop at the budget of {stopping.max_measurements} measurements. Relative SE is SE/|value| for scale parameters, and SE divided by the measured x- or y-span for location and offset parameters.
+- **Stopping rule:** stop when the best model beats the runner-up by ΔBIC ≥ {stopping.delta_bic_threshold:g}, every parameter's relative standard error is below {stopping.max_rel_se:.0%}, and at least {stopping.min_points} points exist; otherwise stop at the budget of {stopping.max_measurements} measurements. Relative SE is SE/|value| for scale parameters, and SE divided by the measured x- or y-span for location and offset parameters.{_stability_text(stopping)}
 
 ## 3. Observations
 | Attempt | Source | x ({view.independent.units}) | y ({view.dependent.units}) |

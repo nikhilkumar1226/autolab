@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from agents.models import GPSuggestion, Hypothesis
 from analysis.model_library import AnalysisResult
-from analysis.stopping import StopDecision
+from analysis.stopping import PointPrediction, StopDecision
 from config import RUNS_DIR, SystemConfig
 from experiments.registry import AgentExperimentView, ExperimentSpec
 from hardware.base import DataSource
@@ -56,6 +56,9 @@ class StepRecord(BaseModel):
     message: str = ""
     n_points: int = Field(description="Number of measurements after this step")
     gp: Optional[GPSuggestion] = None
+    prediction: Optional[PointPrediction] = Field(
+        default=None, description="This measurement as predicted by the best model fitted before it"
+    )
     analysis: Optional[AnalysisResult] = Field(default=None, description="Fits after this measurement")
     duration_s: float = 0.0
 
