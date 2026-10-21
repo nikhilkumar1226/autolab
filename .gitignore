@@ -25,3 +25,7 @@ output/reports/*
 !output/**/.gitkeep
 runs/*
 !runs/demo/
+
+# teammate's reference copy (read-only inspiration) and the LLM response cache
+reference/
+llm_cache/
