@@ -14,6 +14,10 @@ class DataSource(str, Enum):
     FIRMWARE_IN_THE_LOOP = "FIRMWARE-IN-THE-LOOP (Wokwi)"
     PHYSICAL_RIG = "PHYSICAL RIG"
 
+class RigConnectionError(ConnectionError):
+    """The rig did not answer when the run started. Nothing was moved."""
+
+
 class MeasurementResult(BaseModel):
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     actuator_position: float = Field(description="Actuator setting (e.g. angle in degrees, position in mm)")

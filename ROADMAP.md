@@ -324,6 +324,23 @@ When done, stop and summarise what you built; I will then run the Phase checkpoi
 - [ ] `--full` (with the real LLM) has run once and `results/` is filled. (Open: `results/` is filled from `--full --provider mock`. The baseline rows are final; the LLM rows are mock and labelled. Needs a key; see docs/HANDOFF.md.)
 - [ ] Send me `results/` and I'll check the numbers before they go into the report.
 
+### Phase 5.1 — Free-tier real-LLM subset (replaces the paid full real-LLM run)
+
+The full real-LLM run needs paid credit (about 6,700 calls); it stays available but is optional. Instead:
+`python -m benchmark.run --subset`, with real LLM methods (llm_only, autolab) on malus_law,
+inverse_square_law, rc_charging and diode_iv. The conditions are clean, faults and hidden_apparatus
+(names and units only, no apparatus description, clean physics). It uses 3 seeds and reuses the
+non-LLM baseline rows. Requests are paced for the free tiers (Gemini Flash-Lite, then Groq). The run
+resumes after interruptions and daily limits, and `--dry-run` shows the estimate. Everything is
+labelled "reduced subset, real LLM: <models used>". The same phase fixes `python -m llm.check` for
+Groq: the ping now asks like the agents do.
+
+**Done when:**
+- [x] `--subset --dry-run` prints the chain, runs, calls, tokens and time. (72 runs, about 1,100 calls, about 1.8 h at 10 RPM.)
+- [x] A mock rehearsal writes RESULTS.md and figures with the subset label; tests cover pacing, the stop and resume on unavailable models, hidden_apparatus, and the mocked Groq `json_validate_failed`.
+- [ ] The subset has run with the real free-tier chain and `results/subset/` is filled. (Open: needs Nikhil's keys and about 2 h, possibly over two days; see docs/HANDOFF.md.)
+- [ ] `python -m llm.check` prints OK for the Groq models. (Open: needs the Groq key.)
+
 ---
 
 ## Phase 6 — Firmware upgrade and firmware-in-the-loop (Wokwi)
@@ -456,5 +473,5 @@ Phase checkpoint.
 **Rules**
 - Keys go only in `.env` (local) or Streamlit **Secrets** (hosted). Never in code, chats, screenshots or commits.
 - Use `LLM_PROVIDER=mock` for development and tests; switch to `litellm` only for real runs.
-- The big benchmark (Phase 5) makes many calls. Run LLM methods with few seeds (default 5) to save credit and quota.
+- The big benchmark (Phase 5) makes many calls. Run LLM methods with few seeds (default 5) to save credit and quota. Without credit, use the free-tier subset instead: `python -m benchmark.run --subset` (Phase 5.1).
 - Optional extra free backup: a Groq key (`groq/openai/gpt-oss-120b`) or local Ollama can be added at the end of `LLM_FALLBACKS`.

@@ -2,9 +2,14 @@
 Key and model check: `python -m llm.check`.
 
 Sends one tiny JSON request to every model in the chain (LLM_MODEL, then LLM_FALLBACKS)
-and prints OK or the error for each. No cache and a single attempt per model, so each
-line reflects the model's state right now. Keys are never printed, only the names of
-missing ones. Exit code 0 if at least one model answers.
+and prints OK or the error for each. The ping takes the same path as the agents: the
+agents' output-token cap, structured-output mode, temperature, timeout and JSON re-asks.
+An earlier version capped the ping at 32 output tokens; a reasoning model (gpt-oss on Groq)
+spends those on reasoning, returns nothing, and Groq's JSON mode then reports
+"json_validate_failed", although real runs work. Only three things differ from a run: the
+chain is this one model, the cache is off, and a rate limit is reported at once instead of
+waited out. Keys are never printed, only the names of missing ones. Exit code 0 if at least
+one model answers.
 """
 import argparse
 import logging
@@ -29,9 +34,10 @@ USER = '{"request": "ping"}'
 
 
 def check_model(model: str, base: LLMConfig) -> LLMCallRecord:
+    """One ping to one model through LLMClient.complete_json with the agents' settings (see the module docstring)."""
     cfg = base.model_copy(update={
         "provider": "litellm", "model": model, "fallbacks": [], "cache": False,
-        "max_json_retries": 0, "rate_limit_retries": 0, "max_output_tokens": 32,
+        "rate_limit_retries": 0, "rate_limit_cooldown_s": 0.0, "min_request_interval_s": 0.0,
     })
     client = LLMClient(cfg)
     try:

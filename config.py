@@ -170,6 +170,16 @@ class LLMConfig(BaseModel):
         description="auto = JSON schema where litellm says the model supports it, else plain JSON mode"
     )
     cache: bool = Field(default=True, description="Serve identical prompts from the disk cache, so reruns cost nothing")
+    min_request_interval_s: float = Field(
+        default=0.0, ge=0.0,
+        description="Pacing: at least this many seconds between network requests in this process (0 = no pacing). "
+                    "Free tiers limit requests per minute; the benchmark's --rpm sets this"
+    )
+    rate_limit_cooldown_s: float = Field(
+        default=300.0, ge=0.0,
+        description="After a model is still rate-limited when its retries run out, skip it for this long (in this "
+                    "process) and go straight to the next model; a daily quota will not come back within minutes"
+    )
     cache_dir: Path = Field(default=LLM_CACHE_DIR)
 
     @property
@@ -205,6 +215,10 @@ class AgentConfig(BaseModel):
     blind: bool = Field(
         default=False,
         description="Hide the apparatus description and variable names from every LLM agent (units and bounds stay)"
+    )
+    describe_apparatus: bool = Field(
+        default=True,
+        description="False: the agents get the variable names and units but no description of the apparatus"
     )
     max_reproposals: int = Field(
         default=2, ge=0,

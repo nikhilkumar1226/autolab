@@ -1,10 +1,13 @@
 """
 Phase 5: the benchmark's metrics, the new samplers (grid, LLM-only), and a tiny end-to-end
-benchmark (plan, resume, CSVs, figures, RESULTS.md).
+benchmark (plan, resume, CSVs, figures, RESULTS.md). Phase 5.1: the free-tier subset (plan,
+pacing, hidden apparatus, stop and resume on unavailable models, labels).
 """
 import csv
 import json
 import math
+from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -13,9 +16,10 @@ from agents.lead_scientist import gap_point
 from agents.orchestrator import DiscoveryEngine
 from analysis.model_library import ModelFit
 from benchmark import run as bench
+from benchmark.figures import footer_text
 from benchmark.metrics import mean_ci, param_errors, scoring_truth, wilson
 from config import AgentConfig, LLMConfig, NonIdealityConfig, SimulationConfig
-from experiments.registry import get_experiment
+from experiments.registry import HIDDEN_DESCRIPTION, get_experiment
 from optimization.baselines import GridSampler, RandomSampler, van_der_corput_fractions
 
 
@@ -132,4 +136,136 @@ def test_dry_run_estimates_llm_calls_without_running(tmp_path, capsys):
     argv = ["--full", "--provider", "litellm", "--experiments", "malus_law", "--work", str(tmp_path), "--dry-run"]
     assert bench.main(argv) == 0
     out = capsys.readouterr().out
-    assert "Real LLM: about" in out and not any(tmp_path.joinpath("rows").iterdir())
+    assert "Real LLM: 40 runs to do (0 already done). Estimated" in out and not any(tmp_path.joinpath("rows").iterdir())
+
+
+# --- Phase 5.1: the free-tier subset ------------------------------------------------------------
+
+def subset_args(**kw):
+    args = dict(methods=[*bench.BASELINE_METHODS, *bench.LLM_METHODS], provider="litellm", chain="abcd1234",
+                llm_seeds=bench.SUBSET_SEEDS, seeds=20, experiments=bench.SUBSET_EXPERIMENTS,
+                conditions=bench.SUBSET_CONDITIONS, no_curves=True, subset=True)
+    return SimpleNamespace(**{**args, **kw})
+
+
+def test_the_subset_plan_runs_only_the_llm_methods_on_hidden_apparatus():
+    tasks = bench.plan_stage1(subset_args())
+    llm = [t for t in tasks if t.method in bench.LLM_METHODS]
+    base = [t for t in tasks if t.method not in bench.LLM_METHODS]
+    assert len(llm) == 2 * 4 * 3 * 3 and len(base) == 3 * 4 * 2 * 20
+    assert {t.condition for t in llm} == {"clean", "faults", "hidden_apparatus"}
+    assert "hidden_apparatus" not in {t.condition for t in base}  # a non-LLM method never reads the description
+    assert all(t.key.endswith("-cabcd1234") and t.provider == "litellm" for t in llm)
+    assert all(t.provider == "none" and t.chain == "" for t in base)
+    assert {t.kind for t in tasks} == {"adaptive"}
+    assert bench.plan_stage2(subset_args(), [{"kind": "adaptive"}]) == []
+    # Another model chain gets other rows: answers from different models never mix.
+    other = bench.plan_stage1(subset_args(chain=bench.chain_fingerprint(["groq/x"])))
+    assert {t.key for t in other if t.method == "autolab"}.isdisjoint({t.key for t in llm})
+
+
+def test_hidden_apparatus_is_clean_physics_without_the_description_and_paced():
+    task = bench.Task(kind="adaptive", method="autolab", provider="litellm", experiment="malus_law",
+                      condition="hidden_apparatus", seed=0, budget=30, chain="abcd1234")
+    cfg = bench.make_config(task, Path("unused"), rpm=10)
+    assert cfg.agent.describe_apparatus is False and cfg.llm.min_request_interval_s == pytest.approx(6.0)
+    assert cfg.simulation.faults == [] and not cfg.simulation.nonideal.enabled
+    clean = bench.make_config(task.model_copy(update={"condition": "clean", "provider": "mock"}), Path("unused"), rpm=10)
+    assert clean.agent.describe_apparatus is True and clean.llm.min_request_interval_s == 0.0  # mock is never paced
+    assert bench.make_config(task, Path("unused")).llm.min_request_interval_s == 0.0
+
+
+def test_the_planner_gets_names_and_units_but_no_apparatus_text(make_config):
+    spec = get_experiment("inverse_square_law")
+    view = spec.agent_view()
+    hidden = view.for_agents(blind=False, describe_apparatus=False)
+    assert hidden.description == HIDDEN_DESCRIPTION and hidden.independent == view.independent
+    assert hidden.dependent == view.dependent and hidden.safe_bounds == view.safe_bounds
+    assert view.for_agents(blind=False, describe_apparatus=True) == view
+    assert view.for_agents(blind=True, describe_apparatus=False).independent.name == "x"  # blind still wins
+
+    record = DiscoveryEngine(make_config("inverse_square_law", agent=AgentConfig(describe_apparatus=False))).run()
+    plan = next(c for c in record.llm_calls if c.purpose == "plan")
+    payload = json.loads(plan.user)
+    assert payload["apparatus"] == HIDDEN_DESCRIPTION
+    assert spec.description_for_agents not in plan.user
+    assert view.independent.name in plan.user and view.dependent.units in plan.user
+
+
+def fake_row(task, unavailable=False):
+    return {**task.model_dump(), "key": task.key, "llm_unavailable": unavailable, "models": {}, "llm_calls": 0,
+            "n_measurements": 0 if unavailable else 9, "error": "every model is rate-limited" if unavailable else ""}
+
+
+def test_an_unavailable_run_is_not_stored_and_two_in_a_row_stop_the_benchmark(tmp_path, monkeypatch):
+    tasks = [bench.Task(kind="adaptive", method="autolab", provider="litellm", experiment="malus_law",
+                        condition="clean", seed=s, budget=30, chain="abcd1234") for s in range(5)]
+    store = bench.Store(tmp_path / "rows")
+    assert store.put(fake_row(tasks[0], unavailable=True)) is False and store.get(tasks[0]) is None
+
+    # unavailable, ok, unavailable, unavailable -> stop; the ok run is kept, the others are retried later.
+    script = iter([True, False, True, True])
+    calls = []
+
+    def fake_execute(task_json, records_dir, usd_to_inr, rpm=0.0):
+        task = bench.Task.model_validate_json(task_json)
+        calls.append((task.seed, rpm))
+        return fake_row(task, unavailable=next(script))
+
+    monkeypatch.setattr(bench, "execute", fake_execute)
+    with pytest.raises(bench.ChainUnavailable, match="2 runs in a row found no model available"):
+        bench.run_tasks(tasks, store, tmp_path / "records", workers=4, usd_to_inr=88.0, rpm=10)
+    assert calls == [(0, 10), (1, 10), (2, 10), (3, 10)]  # one at a time in this process, paced
+    assert [t.seed for t in tasks if store.get(t)] == [1]
+
+    script = iter([False] * 4)
+    calls.clear()
+    rows = bench.run_tasks(tasks, store, tmp_path / "records", workers=4, usd_to_inr=88.0, rpm=10)
+    assert [s for s, _ in calls] == [0, 2, 3, 4] and len(rows) == 5  # resumed: only the missing runs
+
+
+def test_the_subset_exits_with_3_when_the_models_are_out_of_quota(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(bench, "execute", lambda task_json, *a, **k: fake_row(
+        bench.Task.model_validate_json(task_json), unavailable=True))
+    argv = ["--subset", "--experiments", "malus_law", "--conditions", "clean", "--methods", "autolab",
+            "--work", str(tmp_path / "work"), "--out", str(tmp_path / "out")]
+    assert bench.main(argv) == 3
+    out = capsys.readouterr().out
+    assert "Stopped:" in out and "Run the same command again later" in out
+    assert not (tmp_path / "out").exists()
+
+
+def test_subset_dry_run_shows_the_chain_calls_tokens_and_time(tmp_path, capsys):
+    assert bench.main(["--subset", "--work", str(tmp_path), "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "Benchmark (reduced subset): 72 runs with the LLM provider 'litellm'" in out
+    assert "plus 480 non-LLM baseline runs" in out and "Model chain" in out
+    assert "Real LLM: 72 runs to do (0 already done). Estimated" in out and "output tokens" in out
+    assert "At 10 requests per minute: about" in out
+    assert not any(tmp_path.joinpath("rows").iterdir())
+
+
+def test_the_subset_label_names_the_models_that_answered():
+    rows = [{"provider": "litellm", "models": {"gemini/flash-lite": 30, "groq/gpt-oss-120b": 4}},
+            {"provider": "litellm", "models": {"gemini/flash-lite": 10}}, {"provider": "none", "models": {}}]
+    label = bench.subset_label(rows, "litellm")
+    assert label == "Reduced subset, real LLM: gemini/flash-lite (40 calls), groq/gpt-oss-120b (4 calls)"
+    assert "not a real LLM" in bench.subset_label(rows, "mock")
+    footer = footer_text(SimpleNamespace(label=label, llm_seeds=3, seeds=20, provider="litellm"))
+    assert label in footer and "mock" not in footer
+
+
+def test_a_subset_rehearsal_with_mock_reuses_baselines_and_labels_everything(tmp_path):
+    out, work = tmp_path / "results", tmp_path / "work"
+    argv = ["--subset", "--provider", "mock", "--experiments", "malus_law", "--conditions", "clean,hidden_apparatus",
+            "--methods", "gp_only,autolab", "--seeds", "1", "--llm-seeds", "1", "--workers", "1",
+            "--out", str(out), "--work", str(work)]
+    assert bench.main(argv) == 0
+    rows = list(csv.DictReader((out / "benchmark_runs.csv").open()))
+    got = {(r["method"], r["condition"], r["reused_from"]) for r in rows}
+    assert got == {("gp_only", "clean", ""), ("gp_only", "hidden_apparatus", "clean"),
+                   ("autolab", "clean", ""), ("autolab", "hidden_apparatus", "")}
+    assert len(list((work / "rows").iterdir())) == 3  # the reused row is shown again, not run again
+    md = (out / "RESULTS.md").read_text()
+    assert "Reduced subset, mock provider (a rehearsal: not a real LLM)" in md and "Same seeds only" in md
+    assert (out / "figures" / "fig_law_accuracy.png").exists()

@@ -739,3 +739,71 @@ An examiner should be able to watch AutoLab work (what each agent proposed, what
 - **The redraw is a polling loop (about 0.35 s).** Each redraw rebuilds the chart; with many points this could flicker on a slow machine. Not tested in a browser.
 - **Session caps live in the Streamlit session.** A visitor who reloads the page starts a new session, so the caps limit accidents, not determined abuse. The password is what protects the API credit.
 - **Run History lists only top-level `runs/` and `runs/demo/`,** not sweep or benchmark subfolders, and at most 200 records.
+
+## Phase 5.1: Free-tier real-LLM subset and the llm.check fix (2026-10-22)
+
+### What changed
+- **`python -m llm.check` now pings each model the way the agents ask it.**
+  - The old ping capped the answer at 32 output tokens and allowed no re-ask. A reasoning model (gpt-oss on Groq) spends 32 tokens on reasoning and returns nothing. Groq's JSON mode then rejects the empty answer with `json_validate_failed`, so the check said "failed" for models that work in real runs.
+  - The ping now goes through `LLMClient.complete_json` with the agents' settings: the same output-token cap, the same JSON mode (schema where litellm says the model supports it, never `strict`), timeout, temperature and JSON re-asks.
+  - Three differences remain: the chain is the one model being checked, the cache is off, and a rate limit is reported at once instead of waited out.
+- **`json_validate_failed` is handled like an invalid answer** everywhere, not only in the check: the client re-asks the same model with the reason fed back (up to `max_json_retries`), then moves to the next model. Before, it counted as a generic 400 error and the model was dropped at once.
+- **Free-tier pacing in the LLM client** (`LLMConfig`):
+  - `min_request_interval_s` (default 0, off) spaces network requests in the process.
+  - `rate_limit_cooldown_s` (default 300 s): a model still rate-limited after its retries is skipped for 5 minutes and the next model is asked directly, instead of being waited out on every call. A daily quota will not come back within minutes.
+- **New condition `hidden_apparatus`** (`AgentConfig.describe_apparatus=False`, CLI `python main.py --hide-apparatus`): the agents get the variable names, units and bounds, but the apparatus description is replaced by a neutral sentence. Unlike blind mode, the names stay. The physics is the clean twin. The report says when the apparatus was hidden.
+- **`python -m benchmark.run --subset`**, the free-tier replacement for the paid full real-LLM benchmark:
+  - malus_law, inverse_square_law, rc_charging and diode_iv; conditions clean, faults and hidden_apparatus; llm_only and autolab with the real provider (default `litellm`); 3 seeds. That is 72 real-LLM runs.
+  - The 480 non-LLM baseline rows (grid, random, gp_only; 20 seeds) are reused from the full benchmark's store (`runs/benchmark/full/rows`). They are not rerun. For hidden_apparatus, the baselines' clean rows are shown again and marked `reused_from = clean`, because a method without an LLM never reads the description.
+  - No learning curves and no equal-budget stage.
+  - **Pacing:** real-LLM runs go one at a time in the main process, at most `--rpm` requests per minute (default 10). Each run prints a progress line naming the models that answered.
+  - **Resume:** every finished run is stored at once. A run cut short because no model was available is *not* stored, so it is retried next time. After 2 such runs in a row (a daily limit, most likely), the benchmark stops with exit code 3 and says how many runs remain. Ctrl-C exits with 130. Rerunning the same command continues, and cached answers replay for free.
+  - **Rows are keyed by the model chain** (a fingerprint of LLM_MODEL + LLM_FALLBACKS), so answers from different models are never mixed in one table.
+  - **`--dry-run`** prints the chain, the runs to do, the estimated calls and input/output tokens (from the mock benchmark's rows where they exist), and the hours at the chosen pace.
+  - **Labels:** RESULTS.md and every figure footer say "Reduced subset, real LLM: <model (calls), …>", built from the models that actually answered. A mock rehearsal says "Reduced subset, mock provider (a rehearsal: not a real LLM)".
+  - RESULTS.md gets a "same seeds only" table, because the LLM methods ran 3 seeds and the baselines 20.
+  - Output goes to `results/subset/`.
+- Benchmark plumbing:
+  - The CSV writer takes the union of all rows' columns.
+  - The run count in RESULTS.md excludes reused rows.
+  - The figure footer is built by one function (`footer_text`).
+
+### Why
+The full real-LLM benchmark needs about 6,700 calls. That needs paid Claude credit, and the free tiers (Gemini Flash-Lite, then Groq) cannot cover it in reasonable time. The subset asks the questions that matter most for the report with about 1,100 calls:
+- Does a real LLM change anything over GP only on four representative laws?
+- Does it help or hurt under faults?
+- How much of its contribution comes from being told what the apparatus is?
+
+The full benchmark stays available for when credit exists.
+
+### How it was verified
+- **`pytest -q`: 416 passed, offline, in about 2 minutes** (404 before). New tests:
+  - `tests/test_llm_client.py`: a mocked Groq `BadRequestError` with `json_validate_failed` and an empty `failed_generation`.
+    - The ping now succeeds because it gets the agents' token cap (the mocked model fails below 256 tokens, as gpt-oss did).
+    - A one-off `json_validate_failed` is re-asked and the call succeeds.
+    - `llm.check` shows the reason when it persists.
+  - Pacing across two clients.
+  - A rate-limited model being skipped while it cools off.
+  - `tests/test_benchmark.py`:
+    - the subset plan: 72 LLM runs, 480 baselines, no hidden_apparatus for non-LLM methods, the chain fingerprint in the keys, no stage 2;
+    - make_config for hidden_apparatus: clean physics, no description, 6 s spacing at 10 RPM, mock never paced;
+    - the planner's actual prompt: the neutral sentence, names and units present, the real description absent;
+    - an unavailable run not stored, 2 in a row stopping the benchmark, the rerun doing only the missing runs;
+    - exit code 3;
+    - the dry-run text;
+    - the label and figure footer naming the models;
+    - an end-to-end mock rehearsal: a reused baseline row shown under hidden_apparatus but not run again, and the RESULTS.md banner.
+- **Dry run with the real `.env` chain** (no requests made): gemini/gemini-3.5-flash-lite → groq/openai/gpt-oss-120b → groq/openai/gpt-oss-20b. 72 runs, about 1,100 calls, ~670k input and ~60k visible output tokens, about 1.8 h at 10 requests per minute.
+- **A mock rehearsal of the whole subset** (`--subset --provider mock`) wrote RESULTS.md, the CSVs and figures with the rehearsal label, into the scratchpad, not `results/`.
+
+### Known limitations
+- **No real LLM was called.** The Groq fix is verified against a mocked error copied from the reported message, not against Groq. `results/subset/` does not exist yet: the subset is run by Nikhil (see docs/HANDOFF.md).
+- **The free-tier limits are not verified.** 10 requests per minute is a conservative guess for Gemini Flash-Lite and Groq. Daily limits change and differ by account; the benchmark stops cleanly when they are reached rather than predicting them.
+- **The token estimate excludes hidden reasoning tokens.** gpt-oss on Groq reasons before answering, which counts against Groq's token-per-minute limit.
+- **3 seeds give wide intervals.** Differences between LLM methods and baselines mix the method with the seed set (3 vs 20); the "same seeds only" table and the figure footers say so.
+- **The answering model can change during a run** when Gemini runs out and Groq takes over. The label lists every model with its share of calls, and each call in the run records names its model, but a table row is not tied to a single model.
+
+### Fix after Phase 5.1: a clear stop when the rig or Wokwi is not reachable
+- **What changed.** If the serial rig did not connect (for example Wokwi not started), the failure was logged and the run went on to HOME, which crashed with a pyserial traceback. Now the run stops before anything moves with `RigConnectionError` ("could not connect to the rig on <port> (<reason>)"). The run record keeps the error. The CLI prints a hint: for `rfc2217://` to start the Wokwi simulator and keep its tab visible, for USB to check the cable, firmware and port.
+- `docs/wokwi.md` now says plainly that the firmware is already built (no arduino-cli needed) and lists the common setup errors.
+- **Verified:** a new test refuses the connection the way pyserial does when nothing listens on port 4000 and checks the message, the hint and the record; by hand, the real command without a simulator now prints the hint. `pytest -q`: 417 passed.

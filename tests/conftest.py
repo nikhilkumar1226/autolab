@@ -13,6 +13,10 @@ os.environ["LLM_PROVIDER"] = "mock"
 os.environ["LLM_MODEL"] = "anthropic/claude-haiku-5-5"
 os.environ["LLM_FALLBACKS"] = "gemini/gemini-3.6-flash,gemini/gemini-3.5-flash-lite"
 os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
+# Keys and the app password are blanked, so tests behave the same whatever the local .env holds
+# (load_dotenv never overrides a variable that is already set; an empty key counts as missing).
+for _name in ("ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "GROQ_API_KEY", "APP_PASSWORD"):
+    os.environ[_name] = ""
 
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
@@ -92,6 +96,9 @@ class _OfflineLiteLLM:
 @pytest.fixture(autouse=True)
 def _offline_llm(monkeypatch):
     monkeypatch.setattr(llm_client, "_litellm", lambda: _OfflineLiteLLM(_REAL_LITELLM()))
+    llm_client.reset_pacing()  # pacing and rate-limit cool-downs are process-wide
+    yield
+    llm_client.reset_pacing()
 
 
 class FakeLiteLLM:

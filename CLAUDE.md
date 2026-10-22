@@ -53,6 +53,8 @@ python -m safety.redteam                                # red-team suite -> resu
 streamlit run app/Home.py                               # dashboard (after Phase 7)
 python -m benchmark.run --quick                         # benchmark smoke test, about 2 min -> results/quick/
 python -m benchmark.run --full --provider mock          # full benchmark (LLM rows mock) -> results/
+python -m benchmark.run --subset --dry-run              # free-tier real-LLM subset: plan, calls, tokens, hours
+python -m benchmark.run --subset                        # run it (paced, resumable; needs keys) -> results/subset/
 ```
 
 ## Conventions

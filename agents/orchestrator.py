@@ -40,7 +40,7 @@ import numpy as np
 
 from config import SystemConfig, config as default_config, describe_twin
 from experiments.registry import AgentExperimentView, ExperimentSpec, get_experiment
-from hardware.base import BaseHardwareRig
+from hardware.base import BaseHardwareRig, RigConnectionError
 from hardware.simulator import PhysicsSimulationRig
 from hardware.serial_driver import SerialHardwareRig
 from hardware.safety_guard import EmergencyStopActive, HardwareSafetyGuard, SafetyLimits, _finite_real
@@ -181,9 +181,7 @@ class DiscoveryEngine:
         Executes one seeded closed-loop experiment and returns its run record.
         """
         cfg = self.config
-        view = self.spec.agent_view()
-        if cfg.agent.blind:
-            view = view.blinded()
+        view = self.spec.agent_view().for_agents(cfg.agent.blind, cfg.agent.describe_apparatus)
         question = question or default_question(view)
         seed = cfg.seed if cfg.seed is not None else secrets.randbits(32)
 
@@ -250,7 +248,7 @@ class DiscoveryEngine:
             self._experiment_loop(run)
             self._finish(run, t0)
         except Exception as exc:
-            if isinstance(exc, LLMUnavailableError):
+            if isinstance(exc, (LLMUnavailableError, RigConnectionError)):
                 logger.error("Run %s stopped: %s", run_id, exc)  # expected and fully described: no traceback
             else:
                 logger.exception("Run %s failed", run_id)
@@ -287,7 +285,10 @@ class DiscoveryEngine:
         run.client.assert_ready()
 
         # 1. Connect and home hardware
-        run.guard.connect()
+        if not run.guard.connect():
+            detail = getattr(run.guard.rig, "last_error", "")
+            raise RigConnectionError(f"could not connect to the rig on {cfg.hardware.port}"
+                                     + (f" ({detail})" if detail else ""))
         run.guard.home()
 
         # 2. Hypothesis and initial design from the agent-facing view only
