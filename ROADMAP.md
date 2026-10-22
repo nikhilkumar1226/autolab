@@ -320,8 +320,8 @@ When done, stop and summarise what you built; I will then run the Phase checkpoi
 ```
 
 **Done when:**
-- [ ] `--quick` runs in under a few minutes.
-- [ ] `--full` (with the real LLM) has run once and `results/` is filled.
+- [x] `--quick` runs in under a few minutes. (142 s for 464 runs on 7 workers.)
+- [ ] `--full` (with the real LLM) has run once and `results/` is filled. (Open: `results/` is filled from `--full --provider mock`. The baseline rows are final; the LLM rows are mock and labelled. Needs a key; see docs/HANDOFF.md.)
 - [ ] Send me `results/` and I'll check the numbers before they go into the report.
 
 ---
