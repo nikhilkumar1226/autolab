@@ -97,6 +97,12 @@ class BaseHardwareRig(ABC):
         if seconds > 0:
             time.sleep(seconds)
 
+    def emergency_stop(self) -> None:
+        """Hardware-side E-stop (e.g. the firmware releases the servo). The guard latches its own E-stop first."""
+
+    def reset_emergency_stop(self) -> None:
+        """Clear a hardware-side E-stop. Called by the guard only after an operator reset."""
+
     def clock(self) -> float:
         """Seconds on the rig's clock, for the safety guard's rate limit and watchdog. The twin keeps simulated time."""
         return time.monotonic()

@@ -354,6 +354,10 @@ class HardwareSafetyGuard:
                 self._estop_reason = reason
                 logger.critical("EMERGENCY STOP TRIGGERED: %s", reason)
                 self._log("estop", "tripped", reason)
+                try:
+                    self.rig.emergency_stop()  # the hardware's own E-stop too, where it has one
+                except Exception as exc:
+                    logger.error("The rig's own E-stop failed (the guard stays latched): %s", exc)
 
     def emergency_stop(self, reason: str = "operator") -> None:
         """Immediately halts operations. Latched: only reset_estop(operator=...) clears it."""
@@ -365,6 +369,11 @@ class HardwareSafetyGuard:
             self._log("reset", "rejected", "a reset needs the operator's name")
             raise SafetyViolationError("E-stop reset refused: give the operator's name (explicit operator reset).")
         with self._lock:
+            try:
+                self.rig.reset_emergency_stop()
+            except Exception as exc:
+                self._log("reset", "rejected", f"the rig refused the reset: {exc}")
+                raise SafetyViolationError(f"E-stop reset refused by the rig: {exc}") from exc
             previous = self._estop_reason
             self._estop_reason = None
             self._last_valid_t = self._now()  # the watchdog restarts from the reset

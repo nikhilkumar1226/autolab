@@ -201,7 +201,7 @@ def build_pdf():
             Paragraph("• <code>hardware/base.py</code>: Abstract base classes and data contracts.<br/>"
                       "• <code>hardware/simulator.py</code>: High-fidelity physics digital twin for Malus's Law & Inverse-Square Law with realistic sensor noise.<br/>"
                       "• <code>hardware/serial_driver.py</code>: PySerial driver for Arduino/ESP32 communication.<br/>"
-                      "• <code>firmware/arduino_rig.ino</code>: C++ firmware for servo/stepper control and I2C/analog sensor sampling.", table_text_style)
+                      "• <code>firmware/arduino_rig/arduino_rig.ino</code>: Arduino Uno firmware for the SG90 servo and an LDR, TSL2591 or emulated sensor.", table_text_style)
         ],
         [
             Paragraph("<b>Phase 2</b>", table_text_style),
@@ -307,11 +307,11 @@ def build_pdf():
     # Hardware Plug & Play Instructions
     story.append(Paragraph("5. Future Physical Hardware Integration Guide", h1_style))
     story.append(Paragraph(
-        "When your physical Arduino/ESP32, servo/stepper, and light sensor arrive, no modifications to the AI agents or optimizer are needed. Follow these steps:",
+        "When your Arduino Uno, SG90 servo and light sensor arrive, no modifications to the AI agents or optimizer are needed. Follow these steps:",
         body_style
     ))
-    story.append(Paragraph("1. <b>Flash Firmware:</b> Open <code>firmware/arduino_rig.ino</code> in Arduino IDE and flash to Arduino Uno / ESP32.", bullet_style))
-    story.append(Paragraph("2. <b>Connect Sensor/Actuator:</b> Connect Servo signal pin to Pin 9 and Photodiode/TSL2591 to Pin A0 / I2C SDA/SCL.", bullet_style))
+    story.append(Paragraph("1. <b>Flash Firmware:</b> Build <code>firmware/arduino_rig</code> with scripts/build_firmware.sh and upload it to the Arduino Uno.", bullet_style))
+    story.append(Paragraph("2. <b>Connect Sensor/Actuator:</b> Connect the servo signal to pin 9 and the LDR divider to A0 (or a TSL2591 to I2C SDA/SCL).", bullet_style))
     story.append(Paragraph("3. <b>Launch on Physical Rig:</b> Execute <code>python3 main.py --hardware --port /dev/ttyUSB0 --baud 115200</code>.", bullet_style))
 
     doc.build(story, canvasmaker=NumberedCanvas)

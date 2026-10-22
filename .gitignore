@@ -32,3 +32,9 @@ llm_cache/
 
 # benchmark smoke-test output (python -m benchmark.run --quick regenerates it in about 2 minutes)
 results/quick/
+
+# firmware builds: keep only what wokwi.toml loads (scripts/build_firmware.sh rebuilds everything)
+firmware/build/*
+!firmware/build/arduino_rig.ino.hex
+!firmware/build/arduino_rig.ino.elf
+firmware/build-*/

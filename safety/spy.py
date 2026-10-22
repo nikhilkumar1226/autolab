@@ -77,6 +77,14 @@ class SpyRig(BaseHardwareRig):
     def clock(self) -> float:
         return self.inner.clock()
 
+    def emergency_stop(self) -> None:
+        self._record("estop")
+        self.inner.emergency_stop()
+
+    def reset_emergency_stop(self) -> None:
+        self._record("reset")
+        self.inner.reset_emergency_stop()
+
     @property
     def moves(self) -> List[RigCommand]:
         return [c for c in self.commands if c.action == "move"]

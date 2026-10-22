@@ -619,3 +619,68 @@ The results chapter needs numbers that are reproducible and honest. This means r
 - **Cost estimates** come from characters / 4 and litellm's bundled price map, which may lag behind real prices. The INR rate (88) is an assumption.
 - **The parameter error is the true law's fit,** even in runs that identified another law. Law accuracy is reported separately.
 - **Learning curves cover the clean twin only.**
+
+## Phase 6: Firmware upgrade and firmware-in-the-loop (Wokwi) (2026-10-22)
+
+### What changed
+- **Firmware v2.0.0.** The sketch moved to `firmware/arduino_rig/arduino_rig.ino`, because arduino-cli needs the folder named after the sketch. Docs and code now agree: an SG90 servo on pin 9 for an Arduino Uno. The old header's stepper, MLX90614 and ESP32 claims are gone.
+  - **The sensor is chosen at compile time** (`#error` unless exactly one is set):
+    - `SENSOR_EMULATED` (default): Malus's law plus Gaussian noise computed on the chip from the servo angle, with the digital twin's values (1000 lux, 20°, 15 lux ambient, σ = 10 lux) and a fixed seed, for firmware-in-the-loop;
+    - `SENSOR_LDR`: a divider on A0 with a nominal GL5528 lux conversion;
+    - `SENSOR_TSL2591`: I2C, with the Adafruit library.
+  - **Firmware-side safety, independent of the host guard:**
+    - bounds of 0–180° and a step limit on every MOVE;
+    - arguments must be plain decimals: `String.toFloat` would have turned `MOVE abc` into a move to 0°;
+    - a 32-character line limit;
+    - ESTOP releases the servo (no holding torque) and latches until RESET;
+    - a command watchdog: 300 s without a command releases the servo and latches the E-stop.
+  - **Protocol.** The old commands keep their replies (PING, HOME, MOVE, READ, STATUS). VERSION, ESTOP and RESET are new.
+    - Errors are `STATUS: ERROR, CODE: <E_SYNTAX|E_BOUNDS|E_STEP|E_ESTOP|E_SENSOR|E_UNKNOWN>, MSG: …`.
+    - Unsolicited lines start with `EVENT:`: the boot banner and a watchdog trip.
+  - **Build:** `scripts/build_firmware.sh [EMULATED|LDR|TSL2591]`. The emulated build's `.hex` and `.elf` are committed for Wokwi (`firmware/build/`); other build files are ignored.
+- **Wokwi project.** `wokwi.toml` loads `firmware/build/` and enables RFC2217 forwarding on port 4000. `diagram.json` wires an Uno, an SG90 (PWM to D9, 5 V, GND) and an LDR module (AO to A0, 5 V, GND).
+- **Serial driver** (`hardware/serial_driver.py`), rewritten.
+  - Ports open with `serial.serial_for_url`, so `COM3`, `/dev/ttyUSB0` and `rfc2217://localhost:4000` all work. The 2 s bootloader wait is applied only to real boards.
+  - On connect it sends PING (up to 3 tries) and reads VERSION.
+  - Each command waits for its own reply type and skips `EVENT:` lines (logged) and stray lines.
+  - A firmware error becomes `FirmwareError` with its code. A missing reply is a `TimeoutError`, which the guard flags as a reading. A dropped link reconnects once and repeats the command; every command is idempotent.
+  - The driver checks that the firmware reports the position it was asked for.
+  - The label is `FIRMWARE-IN-THE-LOOP (Wokwi)` for rfc2217 ports and `PHYSICAL RIG` otherwise.
+- **The guard drives the hardware E-stop.** `emergency_stop` also sends ESTOP to the rig, and `reset_estop(operator=…)` sends RESET first; if the firmware refuses, the guard stays latched. The twin ignores both, and the spy rig records them.
+- **`--hardware` is refused for experiments other than `malus_law`**, because the rig is the polariser.
+- **Rate-limit default raised from 5 to 10 moves/s.** The firmware takes at least 0.12 s per move and reading, so legitimate traffic on the real rig can reach about 7–8 moves/s, and 5/s would have rejected normal runs. The red-team results did not change: the moves-without-reading interlock still stops every burst first.
+- **Docs:** `docs/wokwi.md` (setup, run, manual check, real rig, troubleshooting). The README's and the old PDF generator's firmware claims were corrected.
+
+### Why
+The hardware part of the project needs something real to show: the actual firmware on a simulated Uno, a real wiring diagram, and the unchanged Python driver talking to it. The firmware is also a second, independent safety layer, so a host bug alone cannot drive the servo outside its range.
+
+### How it was verified
+- **`pytest -q`: 391 passed, offline, in about 114 s** (367 before). The 24 new tests in `tests/test_serial_driver.py` use a fake serial port (`tests/fake_firmware.py`) that follows the firmware's rules. They cover:
+  - the Wokwi and USB labels and the bootloader wait;
+  - a silent port that does not connect;
+  - HOME, MOVE and READ following the emulated Malus law;
+  - 9 bad commands refused with the right code, among them `MOVE abc`, `MOVE 1e5`, `MOVE 90;HOME`, `MOVE nan` and an over-long line;
+  - EVENT and stray lines skipped;
+  - a lost reply becoming a timeout that the guard flags;
+  - a dropped link reconnected once;
+  - the guard's E-stop latching the firmware (a direct MOVE is refused by the firmware too), and the operator reset clearing both;
+  - the firmware watchdog;
+  - **a full AutoLab run over the firmware link**: labelled firmware-in-the-loop, converged on cos² with x0 ≈ 20, one MOVE per attempt that was not rejected, report labelled, audit chain intact;
+  - `--hardware` refused for non-Malus experiments;
+  - the source checks: every protocol command and error code is in the `.ino`; the firmware's bounds and emulated optics equal the digital twin's Malus spec; `wokwi.toml` points to the built files; `diagram.json` wires D9 and A0.
+- **All three sensor builds compile** with arduino-cli 1.5.2 (arduino:avr 1.8.8) with `--warnings all` and no warnings from the sketch:
+
+  | Build | Flash | RAM |
+  |---|---|---|
+  | EMULATED | 9,310 B (28%) | 417 B (20%) |
+  | LDR | 9,088 B (28%) | 417 B |
+  | TSL2591 | 12,772 B (39%) | 696 B (33%) |
+
+  A build with two sensors set fails on the `#error`, as intended. The toolchain was set up in a temporary folder; nothing was installed on the system.
+- **Red team rerun with the new rate limit:** identical to Phase 4 (59 cases, 0 unsafe commands; no change to `results/redteam.csv`).
+
+### Known limitations
+- **Not yet run in Wokwi.** That needs the VS Code extension and its licence; it is your step, see docs/HANDOFF.md. The full-run test uses the fake port, which follows the firmware's logic but is not the compiled code.
+- **SENSOR_LDR's lux conversion is nominal** (GL5528, R10 = 50 kΩ, γ = 0.7) until it is calibrated against a lux meter.
+- **The emulated sensor's noise uses a fixed seed (12345).** Firmware runs are not tied to the AutoLab run seed, so a Wokwi run is not reproducible from `--seed`. It is repeatable from a fresh board start with the same commands.
+- **The servo has no position feedback,** so on the real rig a stuck servo can only show up through its readings.
