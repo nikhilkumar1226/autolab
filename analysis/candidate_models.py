@@ -2,25 +2,29 @@
 Candidate models proposed by the Analyst LLM, compiled without ever executing model text.
 
 The LLM may propose one new model per review: an expression in x with named parameters,
-e.g. "A*exp(-k*x) + C". The text passes two independent whitelists and is then compiled
-by walking its expression tree:
+e.g. "A*exp(-k*x) + C". The text is never given to eval, exec, compile, sympy.parse_expr or
+sympify (parse_expr and sympify call eval internally). Instead:
 
-1. String/AST gate. Python's ast module parses the text (parsing runs nothing). Allowed:
-   int/float constants (|c| <= 1e6), x, the declared parameters, pi, + - * / ** and unary
-   +/-, and calls of sin, cos, exp, log, sqrt by bare name with one positional argument.
-   Everything else is rejected: attribute access (np.load), dunders, subscripts, strings,
-   keyword arguments, comparisons, lambdas, comprehensions. A constant exponent must be a
-   single number with |value| <= 10, so "9**9**9" cannot make sympy compute a huge integer.
-2. sympy.parse_expr, with a namespace that holds only those symbols and functions. The
-   resulting tree is walked again: only Add, Mul, Pow, numbers, pi and sin/cos/exp/log may
-   appear, every parameter must still be present, and nothing may be undefined or complex.
-3. A small tree-walking evaluator turns the sympy tree into a numpy function (no eval,
-   exec or lambdify).
+1. Gate. Text longer than 200 characters, or containing "__" anywhere, is rejected outright.
+   Python's ast module then parses it with mode="eval" (parsing runs nothing), and every node
+   is checked against a whitelist: int/float numbers (|c| <= 1e6), x, the declared parameters,
+   pi, e, binary + - * / **, unary minus, and calls of sin, cos, tan, exp, log, sqrt, abs and
+   radians by bare name with exactly one positional argument. Everything else is rejected:
+   attributes (np.load, x.real), subscripts, strings, keyword arguments, lambdas, comparisons,
+   comprehensions, undeclared names. A constant exponent must be a single number with
+   |value| <= 10.
+2. Evaluation. The validated tree is turned into nested closures over a fixed table of numpy
+   operations and evaluated on numpy arrays. A name is looked up in the parameter vector,
+   never in a Python namespace.
+3. Structure checks, done numerically at fixed probe points (the same for every proposal):
+   the expression must be finite somewhere and must depend on x and on every declared
+   parameter. Parameter kinds (scale / x_location / y_offset), which set how the stopping rule
+   normalises relative SE, come from numerical derivatives at those points: dy/dp = 1
+   everywhere is a y_offset, dy/dp = +-dy/dx everywhere an x_location, anything else a scale.
+   They are never taken from the LLM.
 
 The result is an ordinary CandidateModel, so fitting, BIC and the relative standard errors
-work as for the library. Parameter kinds (scale / x_location / y_offset), which set how
-the stopping rule normalises relative SE, are inferred from the expression's structure,
-never taken from the LLM.
+work as for the library.
 
 An accepted LLM model must also add something: drop_equivalent() skips it while its curve
 is indistinguishable from a library fit (or an earlier LLM fit) on the measured range.
@@ -28,18 +32,16 @@ Otherwise a duplicate or a nested superset of the best model would sit within
 delta-BIC ~ ln n of it and block the delta-BIC criterion forever.
 """
 import ast
+import builtins
 import functools
 import keyword
 import logging
 import math
-import operator
 import re
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
-import sympy as sp
 from pydantic import BaseModel, Field, FiniteFloat
-from sympy.parsing.sympy_parser import parse_expr, standard_transformations
 
 from analysis.model_library import MODEL_LIBRARY, AnalysisResult, CandidateModel, ModelFit, ParamKind, SkippedModel
 
@@ -51,14 +53,22 @@ MAX_PARAMS = 4
 MAX_CONSTANT = 1e6
 MAX_CONSTANT_EXPONENT = 10
 
-X = sp.Symbol("x")
-FUNCTIONS = {"sin": sp.sin, "cos": sp.cos, "exp": sp.exp, "log": sp.log, "sqrt": sp.sqrt}
-CONSTANTS = {"pi": sp.pi}
-_NUMPY = {sp.sin: np.sin, sp.cos: np.cos, sp.exp: np.exp, sp.log: np.log}
-_TREE_FUNCS = (sp.Add, sp.Mul, sp.Pow, *_NUMPY)
+FUNCTIONS: Dict[str, Callable[[np.ndarray], np.ndarray]] = {
+    "sin": np.sin, "cos": np.cos, "tan": np.tan, "exp": np.exp,
+    "log": np.log, "sqrt": np.sqrt, "abs": np.abs, "radians": np.radians,
+}
+CONSTANTS: Dict[str, float] = {"pi": math.pi, "e": math.e}
+_BINARY = {ast.Add: np.add, ast.Sub: np.subtract, ast.Mult: np.multiply, ast.Div: np.divide, ast.Pow: np.power}
 _PARAM_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,15}$")
-# sympy's own single-letter names are reserved too, so a reader never confuses them.
-RESERVED_NAMES = {"x", *FUNCTIONS, *CONSTANTS, "E", "I", "N", "S", "O", "Q", "oo", "nan", "zoo", *keyword.kwlist}
+# Python's own names are reserved too, so a reader never mistakes a parameter for a builtin.
+RESERVED_NAMES = {"x", *FUNCTIONS, *CONSTANTS, *keyword.kwlist, *dir(builtins)}
+
+# Fixed probe points for the structure checks: x over many scales and both signs, and two
+# generic parameter vectors. The LLM's own initial guesses are added as a third vector; they
+# can only make a kind harder to qualify for, never easier.
+_PROBE_X = np.concatenate([-np.geomspace(1e3, 1e-2, 11), [0.0], np.geomspace(1e-2, 1e3, 21)])
+_PROBE_PARAMS = ((1.37, 0.83, 1.91, 0.57), (0.61, 1.73, 0.89, 1.29))
+_MIN_PROBES = 3
 
 
 class ParameterGuess(BaseModel):
@@ -71,8 +81,8 @@ class CandidateModelSpec(BaseModel):
     name: str = Field(min_length=1, max_length=80, description="Short descriptive name")
     expression: str = Field(
         min_length=1, max_length=1000,
-        description="sympy syntax in x, e.g. A*exp(-k*x) + C. Allowed: numbers, x, the parameters, pi, "
-                    "+ - * / **, sin cos exp log sqrt (trig in radians)",
+        description="Arithmetic in x, e.g. A*exp(-k*x) + C. Allowed: numbers, x, the parameters, pi, e, "
+                    "+ - * / ** and unary minus, sin cos tan exp log sqrt abs radians (trig in radians)",
     )
     parameters: List[ParameterGuess] = Field(min_length=1, max_length=8, description="Free parameters with initial guesses")
     rationale: str = Field(default="", max_length=600)
@@ -83,35 +93,40 @@ class FormulaRejected(ValueError):
 
 
 # ---------------------------------------------------------------------------
-# 1. String / AST gate
+# 1. Gate: length, "__", ast parse and the node whitelist
 # ---------------------------------------------------------------------------
 
 def _single_number(node: ast.AST) -> Optional[float]:
-    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
         inner = _single_number(node.operand)
-        return None if inner is None else (-inner if isinstance(node.op, ast.USub) else inner)
+        return None if inner is None else -inner
     if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
         return float(node.value)
     return None
 
 
-def _check_ast(text: str, params: Sequence[str]) -> None:
+def _parse(text: str, params: Sequence[str]) -> ast.Expression:
+    if len(text) > MAX_EXPRESSION_CHARS:
+        raise FormulaRejected(f"expression longer than {MAX_EXPRESSION_CHARS} characters")
+    if "__" in text:
+        raise FormulaRejected("'__' is not allowed anywhere in the expression")
     try:
         tree = ast.parse(text, mode="eval")
     except SyntaxError as exc:
         raise FormulaRejected(f"not a valid expression ({exc.msg})") from None
+    except (ValueError, RecursionError, MemoryError):
+        raise FormulaRejected("not a valid expression") from None
     nodes = list(ast.walk(tree))
     if len(nodes) > MAX_NODES:
         raise FormulaRejected(f"expression too complex ({len(nodes)} syntax nodes, limit {MAX_NODES})")
 
     allowed_names = {"x", *CONSTANTS, *params}
     call_targets = {id(n.func) for n in nodes if isinstance(n, ast.Call)}
-    operators = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.UAdd, ast.USub, ast.Load)
     for node in nodes:
-        if isinstance(node, (ast.Expression, *operators)):
+        if isinstance(node, (ast.Expression, ast.Load, ast.USub, *_BINARY)):
             continue
         if isinstance(node, ast.BinOp):
-            if not isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow)):
+            if type(node.op) not in _BINARY:
                 raise FormulaRejected(f"operator {type(node.op).__name__} is not allowed")
             if isinstance(node.op, ast.Pow) and not any(isinstance(n, ast.Name) for n in ast.walk(node.right)):
                 value = _single_number(node.right)
@@ -120,8 +135,8 @@ def _check_ast(text: str, params: Sequence[str]) -> None:
                         f"a constant exponent must be a single number with |value| <= {MAX_CONSTANT_EXPONENT}"
                     )
         elif isinstance(node, ast.UnaryOp):
-            if not isinstance(node.op, (ast.UAdd, ast.USub)):
-                raise FormulaRejected(f"operator {type(node.op).__name__} is not allowed")
+            if not isinstance(node.op, ast.USub):
+                raise FormulaRejected(f"operator {type(node.op).__name__} is not allowed (only unary minus)")
         elif isinstance(node, ast.Constant):
             value = node.value
             if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -133,10 +148,10 @@ def _check_ast(text: str, params: Sequence[str]) -> None:
                 if id(node) not in call_targets:
                     raise FormulaRejected(f"function '{node.id}' must be called with one argument")
             elif node.id not in allowed_names:
-                raise FormulaRejected(f"unknown name '{node.id}' (allowed: x, pi, the declared parameters)")
+                raise FormulaRejected(f"unknown name '{node.id}' (allowed: x, pi, e, the declared parameters)")
         elif isinstance(node, ast.Call):
             if not isinstance(node.func, ast.Name) or node.func.id not in FUNCTIONS:
-                raise FormulaRejected("only sin, cos, exp, log and sqrt may be called, by bare name")
+                raise FormulaRejected(f"only {', '.join(FUNCTIONS)} may be called, by bare name")
             if node.keywords or len(node.args) != 1 or isinstance(node.args[0], ast.Starred):
                 raise FormulaRejected(f"{node.func.id}() takes exactly one positional argument")
         else:
@@ -148,6 +163,7 @@ def _check_ast(text: str, params: Sequence[str]) -> None:
     unused = [p for p in params if p not in names]
     if unused:
         raise FormulaRejected(f"declared parameter(s) not used: {', '.join(unused)}")
+    return tree
 
 
 def _check_params(params: Sequence[str]) -> None:
@@ -156,112 +172,190 @@ def _check_params(params: Sequence[str]) -> None:
     if len(set(params)) != len(params):
         raise FormulaRejected("parameter names must be unique")
     for p in params:
-        if not _PARAM_NAME.match(p) or p in RESERVED_NAMES:
+        if not _PARAM_NAME.match(p) or "__" in p or p in RESERVED_NAMES:
             raise FormulaRejected(f"invalid parameter name '{p}' (letters, digits, '_'; not a reserved name)")
 
 
 # ---------------------------------------------------------------------------
-# 2. sympy parse with a whitelist-only namespace, then a tree check
-# ---------------------------------------------------------------------------
-
-def _to_sympy(text: str, params: Sequence[str]) -> sp.Expr:
-    local = {"x": X, **{p: sp.Symbol(p) for p in params}, **FUNCTIONS, **CONSTANTS}
-    namespace = {"Integer": sp.Integer, "Float": sp.Float, "Rational": sp.Rational, "Symbol": sp.Symbol,
-                 "__builtins__": {}}
-    try:
-        expr = parse_expr(text, local_dict=local, global_dict=namespace, transformations=standard_transformations)
-    except Exception as exc:  # the text already passed the gate; any failure here is a rejection
-        raise FormulaRejected(f"sympy could not parse it ({type(exc).__name__})") from None
-    if not isinstance(expr, sp.Expr):
-        raise FormulaRejected("not a mathematical expression")
-    return expr
-
-
-def _check_tree(expr: sp.Expr, params: Sequence[str]) -> None:
-    if expr.has(sp.zoo, sp.nan, sp.oo, -sp.oo):
-        raise FormulaRejected("the expression is undefined (e.g. a division by zero)")
-    if expr.has(sp.I):
-        raise FormulaRejected("the expression is complex-valued")
-    for node in sp.preorder_traversal(expr):
-        if node.is_Symbol or node is sp.pi or node.is_Rational or node.is_Float:
-            continue
-        if node.func not in _TREE_FUNCS:
-            raise FormulaRejected(f"{node.func.__name__} is not allowed")
-    free = {s.name for s in expr.free_symbols}
-    if "x" not in free:
-        raise FormulaRejected("the expression does not depend on x after simplification")
-    lost = [p for p in params if p not in free]
-    if lost:
-        raise FormulaRejected(f"parameter(s) {', '.join(lost)} have no effect after simplification")
-    if free - {"x", *params}:
-        raise FormulaRejected(f"unexpected symbols: {', '.join(sorted(free - {'x', *params}))}")
-
-
-# ---------------------------------------------------------------------------
-# 3. Tree-walking numpy evaluator (no eval / exec / lambdify)
+# 2. Tree-walking numpy evaluator (no eval / exec / compile / sympy)
 # ---------------------------------------------------------------------------
 
 Evaluator = Callable[[np.ndarray, Sequence[float]], np.ndarray]
 
 
-def _evaluator(expr: sp.Expr, index: Dict[sp.Symbol, int]) -> Evaluator:
-    if expr == X:
-        return lambda x, p: x
-    if expr.is_Symbol:
-        i = index[expr]
-        return lambda x, p: p[i]
-    if expr.is_Rational or expr.is_Float or expr is sp.pi:
-        value = float(expr)
+def _build(node: ast.AST, index: Dict[str, int]) -> Evaluator:
+    """Closures over the validated tree. Only node types the gate accepted can reach here."""
+    if isinstance(node, ast.Constant):
+        value = float(node.value)
         return lambda x, p: value
-    args = [_evaluator(a, index) for a in expr.args]
-    if expr.func is sp.Add:
-        return lambda x, p: functools.reduce(operator.add, (f(x, p) for f in args))
-    if expr.func is sp.Mul:
-        return lambda x, p: functools.reduce(operator.mul, (f(x, p) for f in args))
-    if expr.func is sp.Pow:
-        base, exponent = args
-        return lambda x, p: np.power(base(x, p), exponent(x, p))
-    if expr.func in _NUMPY:
-        fn, (inner,) = _NUMPY[expr.func], args
+    if isinstance(node, ast.Name):
+        if node.id == "x":
+            return lambda x, p: x
+        if node.id in CONSTANTS:
+            value = CONSTANTS[node.id]
+            return lambda x, p: value
+        i = index[node.id]
+        return lambda x, p: p[i]
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        inner = _build(node.operand, index)
+        return lambda x, p: np.negative(inner(x, p))
+    if isinstance(node, ast.BinOp) and type(node.op) in _BINARY:
+        op, left, right = _BINARY[type(node.op)], _build(node.left, index), _build(node.right, index)
+        return lambda x, p: op(left(x, p), right(x, p))
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in FUNCTIONS:
+        fn, inner = FUNCTIONS[node.func.id], _build(node.args[0], index)
         return lambda x, p: fn(inner(x, p))
-    raise FormulaRejected(f"{expr.func.__name__} is not allowed")  # unreachable after _check_tree
+    raise FormulaRejected(f"{type(node).__name__} is not allowed")  # unreachable after the gate
 
 
-def _kind(expr: sp.Expr, p: sp.Symbol) -> ParamKind:
-    d = sp.diff(expr, p)
-    if sp.simplify(d - 1) == 0:
-        return "y_offset"
-    dx = sp.diff(expr, X)
-    if dx != 0 and (sp.simplify(d + dx) == 0 or sp.simplify(d - dx) == 0):
-        return "x_location"
-    return "scale"
+def _evaluate(tree: Evaluator, x: np.ndarray, p: Sequence[float]) -> np.ndarray:
+    with np.errstate(all="ignore"):
+        out = np.asarray(tree(x, p), dtype=float)
+    return out if out.shape == x.shape else np.array(np.broadcast_to(out, x.shape))
+
+
+# ---------------------------------------------------------------------------
+# 3. Numerical structure checks and parameter kinds
+# ---------------------------------------------------------------------------
+
+def _structure(tree: Evaluator, params: Sequence[str], guesses: Sequence[float]) -> Tuple[ParamKind, ...]:
+    k = len(params)
+    vectors = [np.array(v[:k], dtype=float) for v in _PROBE_PARAMS]
+    if any(not np.allclose(np.asarray(guesses, dtype=float), v) for v in vectors):
+        vectors.append(np.asarray(guesses, dtype=float))
+
+    x = _PROBE_X
+    hx = 1e-6 * np.maximum(1.0, np.abs(x))
+    f_all, dx_all, dp_all, x_all, p_all = [], [], [], [], []
+    for v in vectors:
+        f = _evaluate(tree, x, v)
+        dfdp = []
+        with np.errstate(all="ignore"):
+            dfdx = (_evaluate(tree, x + hx, v) - _evaluate(tree, x - hx, v)) / (2 * hx)
+            for i in range(k):
+                h = 1e-6 * max(1.0, abs(v[i]))
+                up, down = v.copy(), v.copy()
+                up[i] += h
+                down[i] -= h
+                dfdp.append((_evaluate(tree, x, up) - _evaluate(tree, x, down)) / (2 * h))
+        dfdp = np.array(dfdp)
+        valid = np.isfinite(f) & np.isfinite(dfdx) & np.all(np.isfinite(dfdp), axis=0)
+        f_all.append(f[valid])
+        dx_all.append(dfdx[valid])
+        dp_all.append(dfdp[:, valid])
+        x_all.append(x[valid])
+        p_all.append(np.repeat(np.abs(v)[:, None], int(valid.sum()), axis=1))
+
+    f, dfdx, dfdp = np.concatenate(f_all), np.concatenate(dx_all), np.concatenate(dp_all, axis=1)
+    xs, ps = np.concatenate(x_all), np.concatenate(p_all, axis=1)
+    if f.size < _MIN_PROBES:
+        raise FormulaRejected("the expression is undefined (not finite) at almost every probe point")
+
+    # Sensitivities: the change in y for a relative change in the variable, against y's own size.
+    scale = 1e-7 * (1.0 + np.abs(f))
+    if not np.any(np.abs(dfdx) * np.maximum(1.0, np.abs(xs)) > scale):
+        raise FormulaRejected("the expression does not depend on x")
+    dead = [p for i, p in enumerate(params) if not np.any(np.abs(dfdp[i]) * np.maximum(1.0, ps[i]) > scale)]
+    if dead:
+        raise FormulaRejected(f"parameter(s) {', '.join(dead)} have no effect on the expression")
+
+    tol = 1e-5 * (np.abs(dfdp) + np.abs(dfdx)) + 1e-6 * (1.0 + np.abs(f))
+    kinds: List[ParamKind] = []
+    for i in range(k):
+        if np.all(np.abs(dfdp[i] - 1.0) <= tol[i]):
+            kinds.append("y_offset")
+        elif np.all(np.abs(dfdp[i] + dfdx) <= tol[i]) or np.all(np.abs(dfdp[i] - dfdx) <= tol[i]):
+            kinds.append("x_location")
+        else:
+            kinds.append("scale")
+    return tuple(kinds)
+
+
+# ---------------------------------------------------------------------------
+# LaTeX, printed from the validated tree
+# ---------------------------------------------------------------------------
+
+_ADD, _MUL, _NEG, _POW, _ATOM = 1, 2, 3, 4, 5
+_GREEK = {"alpha", "beta", "gamma", "delta", "epsilon", "eta", "theta", "kappa", "mu", "nu", "rho", "sigma",
+          "tau", "phi", "omega", "Gamma", "Delta", "Theta", "Phi", "Omega"}
 
 
 def _num(v: float) -> str:
     return f"{v:.4g}"
 
 
+def latex_name(name: str) -> str:
+    """x0 -> x_{0}, I_max -> I_{max}, theta -> \\theta, rate -> \\mathrm{rate}."""
+    def word(w: str) -> str:
+        return f"\\{w}" if w in _GREEK else w if len(w) == 1 else f"\\mathrm{{{w}}}"
+    m = re.match(r"^([A-Za-z]+)(\d+)$", name)
+    if m:
+        return f"{word(m.group(1))}_{{{m.group(2)}}}"
+    if "_" in name:
+        head, tail = name.split("_", 1)
+        return f"{word(head)}_{{{tail.replace('_', ',')}}}" if head else word(tail)
+    return word(name)
+
+
+def _paren(text: str) -> str:
+    return f"\\left({text}\\right)"
+
+
+def _tex(node: ast.AST) -> Tuple[str, int]:
+    if isinstance(node, ast.Constant):
+        return _num(float(node.value)), _ATOM
+    if isinstance(node, ast.Name):
+        return {"pi": "\\pi", "e": "e", "x": "x"}.get(node.id) or latex_name(node.id), _ATOM
+    if isinstance(node, ast.UnaryOp):
+        text, prec = _tex(node.operand)
+        return "-" + (_paren(text) if prec <= _ADD else text), _NEG
+    if isinstance(node, ast.Call):
+        name, (text, _) = node.func.id, _tex(node.args[0])
+        if name == "exp":
+            return f"e^{{{text}}}", _POW
+        if name == "sqrt":
+            return f"\\sqrt{{{text}}}", _ATOM
+        if name == "abs":
+            return f"\\left|{text}\\right|", _ATOM
+        if name == "radians":
+            return f"\\frac{{\\pi}}{{180}}{_paren(text)}", _MUL
+        return f"\\{'ln' if name == 'log' else name}{_paren(text)}", _ATOM
+    left, lp = _tex(node.left)
+    right, rp = _tex(node.right)
+    op = type(node.op)
+    if op in (ast.Add, ast.Sub):
+        if rp <= _ADD or rp == _NEG:
+            right = _paren(right)
+        return f"{left} {'+' if op is ast.Add else '-'} {right}", _ADD
+    if op is ast.Mult:
+        left = _paren(left) if lp <= _ADD else left
+        right = _paren(right) if rp <= _ADD or rp == _NEG else right
+        joiner = " \\cdot " if right[:1].isdigit() else "\\,"
+        return f"{left}{joiner}{right}", _MUL
+    if op is ast.Div:
+        return f"\\frac{{{left}}}{{{right}}}", _MUL
+    return f"{_paren(left) if lp < _ATOM else left}^{{{right}}}", _POW
+
+
+# ---------------------------------------------------------------------------
+# Compiling
+# ---------------------------------------------------------------------------
+
 def compile_candidate(spec: CandidateModelSpec, key: str, name: Optional[str] = None) -> CandidateModel:
     """Validate and compile an LLM-proposed model. Raises FormulaRejected with a reason."""
-    text = spec.expression.strip().replace("^", "**")
-    if len(text) > MAX_EXPRESSION_CHARS:
+    raw = spec.expression.strip()
+    if len(raw) > MAX_EXPRESSION_CHARS:
         raise FormulaRejected(f"expression longer than {MAX_EXPRESSION_CHARS} characters")
+    text = raw.replace("^", "**")
     params = [p.name for p in spec.parameters]
     _check_params(params)
-    _check_ast(text, params)
-    expr = _to_sympy(text, params)
-    _check_tree(expr, params)
-
-    symbols = [sp.Symbol(p) for p in params]
-    tree = _evaluator(expr, {s: i for i, s in enumerate(symbols)})
-    kinds = tuple(_kind(expr, s) for s in symbols)
+    tree = _parse(text, params)
+    evaluate = _build(tree.body, {p: i for i, p in enumerate(params)})
     guesses = [float(p.initial_guess) for p in spec.parameters]
+    kinds = _structure(evaluate, params, guesses)
 
     def func(x, *p):
-        x = np.asarray(x, dtype=float)
-        with np.errstate(all="ignore"):
-            out = np.asarray(tree(x, p), dtype=float)
-        return out if out.shape == x.shape else np.full(x.shape, out)
+        return _evaluate(evaluate, np.asarray(x, dtype=float), p)
 
     def initial_guess(x, y):
         """The LLM's guesses or all ones, whichever fits the data better."""
@@ -272,10 +366,10 @@ def compile_candidate(spec: CandidateModelSpec, key: str, name: Optional[str] = 
                 best, best_ssr = start, ssr
         return best
 
-    symbolic = sp.latex(expr)
+    symbolic = _tex(tree.body)[0]
 
     def latex(values: Dict[str, float]) -> str:
-        listed = ",\\ ".join(f"{sp.latex(s)} = {_num(values[s.name])}" for s in symbols)
+        listed = ",\\ ".join(f"{latex_name(p)} = {_num(values[p])}" for p in params)
         return f"y = {symbolic},\\quad {listed}"
 
     return CandidateModel(

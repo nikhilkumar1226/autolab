@@ -203,6 +203,8 @@ column. Never let the LLM change safety bounds or the simulator's ground truth.
 When done, stop and summarise what you built; I will then run the Phase checkpoint.
 ```
 
+*Change after review (Oct 22): step 3 no longer uses `sympy.parse_expr`, which calls `eval` internally. Proposed expressions are parsed with `ast.parse(mode="eval")`, checked against a whitelist and evaluated by walking the tree with numpy (CLAUDE.md rule 2).*
+
 **Done when:**
 - [ ] `python -m llm.check` shows which keys work (Claude, Gemini). (Open: the tool works and reports every model, but `.env` still has the old layout and no keys. Copy the layout from `.env.example`, add the keys and rerun it. See docs/CHANGELOG.md.)
 - [x] `python main.py --provider mock` works with no key.

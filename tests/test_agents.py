@@ -233,7 +233,7 @@ def test_a_dangerous_candidate_model_is_rejected_and_the_run_continues(make_conf
     record = DiscoveryEngine(make_config(llm=litellm_config())).run()
 
     assert record.candidate_models and all(c.status == "rejected" for c in record.candidate_models)
-    assert "only sin, cos, exp, log and sqrt may be called" in record.candidate_models[0].reason
+    assert "'__' is not allowed" in record.candidate_models[0].reason
     assert record.stop.reason == StopReason.CONVERGED
     assert record.result.final_analysis.best.key == "cos2_phase"
     assert not Path("hacked").exists() and not (tmp_path / "hacked").exists()
