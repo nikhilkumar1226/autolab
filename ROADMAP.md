@@ -354,8 +354,8 @@ When done, stop and summarise what you built; I will then run the Phase checkpoi
 ```
 
 **Done when:**
-- [ ] The Wokwi simulation runs, and a full AutoLab run completes against it.
-- [ ] You have a screenshot of the Wokwi circuit; this becomes the circuit diagram in the black book.
+- [ ] The Wokwi simulation runs, and a full AutoLab run completes against it. (Open: needs the Wokwi extension and its licence, see docs/wokwi.md. Done so far: the firmware compiles in all three sensor variants, and a full run passes against a fake port that follows the firmware's protocol.)
+- [ ] You have a screenshot of the Wokwi circuit; this becomes the circuit diagram in the black book. (Open: needs the Wokwi extension.)
 
 ---
 
