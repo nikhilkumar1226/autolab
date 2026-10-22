@@ -204,10 +204,10 @@ When done, stop and summarise what you built; I will then run the Phase checkpoi
 ```
 
 **Done when:**
-- [ ] `python -m llm.check` shows which keys work (Claude, Gemini).
-- [ ] `python main.py --provider mock` works with no key.
-- [ ] With a real key, `python main.py --provider litellm` works, and the run JSON shows the real prompts, responses, tokens and cost.
-- [ ] `--provider none` still works (this is your "no LLM" baseline).
+- [ ] `python -m llm.check` shows which keys work (Claude, Gemini). (Open: the tool works and reports every model, but `.env` still has the old layout and no keys. Copy the layout from `.env.example`, add the keys and rerun it. See docs/CHANGELOG.md.)
+- [x] `python main.py --provider mock` works with no key.
+- [ ] With a real key, `python main.py --provider litellm` works, and the run JSON shows the real prompts, responses, tokens and cost. (Open: needs a key. Without one, the run stops with a clear error and never falls back to mock; the litellm path is tested offline with a scripted fake.)
+- [x] `--provider none` still works (this is your "no LLM" baseline).
 
 ---
 
