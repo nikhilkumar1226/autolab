@@ -24,7 +24,9 @@ def _flat(row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def write_csv(path: Path, rows: List[Dict[str, Any]], first: Sequence[str] = ()) -> None:
-    columns = list(first) + [k for k in (rows[0] if rows else {}) if k not in first]
+    columns = list(first)
+    for row in rows:  # the union of keys: some rows have extra ones (e.g. reused_from)
+        columns += [k for k in row if k not in columns]
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=columns, extrasaction="ignore")
         writer.writeheader()
@@ -70,10 +72,21 @@ def results_md(rows: List[Dict[str, Any]], args, mode: str, figure_names: List[s
     command = f"python -m benchmark.run --{mode} --provider {args.provider}"
     if mode == "full" and (args.seeds != 20 or args.llm_seeds != 5):
         command += f" --seeds {args.seeds} --llm-seeds {args.llm_seeds}"
-    add("# AutoLab benchmark results\n")
+    if mode == "subset" and args.rpm:
+        command += f" --rpm {args.rpm:g}"
+    add("# AutoLab benchmark results" + (" (reduced subset)" if mode == "subset" else "") + "\n")
     add(f"*Generated {when} by `{command}`. Every number below comes from `benchmark_runs.csv` in this folder.*\n")
     add("> **Data source: DIGITAL TWIN** for every run.")
-    if args.provider == "mock":
+    if mode == "subset":
+        add(f">\n> **{args.label}.**")
+        add(">\n> Reduced subset for a free-tier budget: experiments "
+            f"{', '.join(args.experiments)}; conditions {', '.join(CONDITION_LABEL.get(c, c) for c in conditions)}; "
+            f"LLM-only and AutoLab with {args.llm_seeds} seeds each. The baselines (grid, random, GP only) are the full "
+            f"benchmark's non-LLM rows ({args.seeds} seeds). Non-LLM methods never read the apparatus description, so "
+            "their clean rows stand for *apparatus hidden*. Comparisons between the LLM methods "
+            f"({args.llm_seeds} seeds) and the baselines ({args.seeds} seeds) mix method and seed set; section 1b "
+            "compares on the same seeds. With so few seeds, the intervals are wide: read differences as indications, not results.")
+    elif args.provider == "mock":
         add(">\n> **LLM methods ran with the mock provider**, a deterministic stand-in, not a language model. In "
             "AutoLab-mock the Planner always hands the choice to the GP, so *AutoLab equals GP only by construction*. "
             "LLM-only-mock uses a fixed rule: the widest gap, or where the two best models disagree. These rows show the "
@@ -88,9 +101,13 @@ def results_md(rows: List[Dict[str, Any]], args, mode: str, figure_names: List[s
                 f"The same applies to comparisons of LLM-only (5 seeds) with the baselines (20 seeds).")
     else:
         add(">\n> LLM methods ran with a real model through litellm; the models that answered are in `benchmark_runs.csv` (`models`).")
-    n_err = sum(r["status"] != "ok" for r in rows)
+    runs = [r for r in rows if not r.get("reused_from")]
+    reused = len(rows) - len(runs)
+    n_err = sum(r["status"] != "ok" for r in runs)
     add(f"\nSeeds: {args.seeds} for grid / random / GP only, {args.llm_seeds} for LLM-only and AutoLab. "
-        f"Runs: {len(rows)} ({n_err} ended in an error). Experiments: {', '.join(args.experiments)}. "
+        f"Runs: {len(runs)} ({n_err} ended in an error)"
+        + (f", plus {reused} clean baseline rows shown again under apparatus hidden" if reused else "")
+        + f". Experiments: {', '.join(args.experiments)}. "
         f"Every method starts from the same 4-point design and uses the same stopping rule and safety guard.\n")
 
     add("## 1. Law identified correctly (blind), all experiments pooled\n")
@@ -103,6 +120,20 @@ def results_md(rows: List[Dict[str, Any]], args, mode: str, figure_names: List[s
             cells.append(_pct(*wilson(sum(r["correct"] for r in ok), len(ok))) + f" (n={len(ok)})")
         add(f"| {METHOD_STYLE[m]['label']} | " + " | ".join(cells) + " |")
     add("\nWilson 95% intervals in brackets.\n")
+
+    if mode == "subset":
+        add(f"## 1b. Same seeds only (0-{args.llm_seeds - 1}), all experiments pooled\n")
+        add("| Method | " + " | ".join(CONDITION_LABEL.get(c, c) for c in conditions) + " |")
+        add("|---" * (len(conditions) + 1) + "|")
+        for m in methods:
+            cells = []
+            for c in conditions:
+                ok = [r for r in _ok(adaptive, method=m, condition=c) if r["seed"] < args.llm_seeds]
+                n = [r["n_measurements"] for r in ok]
+                cells.append(f"{sum(r['correct'] for r in ok)}/{len(ok)} correct, median n "
+                             f"{statistics.median(n):g}" if ok else "–")
+            add(f"| {METHOD_STYLE[m]['label']} | " + " | ".join(cells) + " |")
+        add("")
 
     add("## 2. Law identified, per experiment\n")
     for c in conditions:
@@ -178,6 +209,9 @@ def results_md(rows: List[Dict[str, Any]], args, mode: str, figure_names: List[s
 
     add("## 6. LLM use and cost per run (adaptive runs, all conditions)\n")
     model = args.estimate_model
+    if mode == "subset" and args.provider == "litellm":
+        add("Costs are litellm's list prices for the models that answered; on a free tier nothing is charged. "
+            f"₹ at {args.usd_inr:g} INR/USD (assumed rate).\n")
     if args.provider == "mock":
         add(f"The mock provider costs nothing. *Estimated* cost of a real model: prompt and answer characters / 4 as "
             f"tokens, priced with litellm's bundled price map for `{model}`"
@@ -218,8 +252,25 @@ def results_md(rows: List[Dict[str, Any]], args, mode: str, figure_names: List[s
     return "\n".join(lines) + "\n"
 
 
+def subset_rows(rows: List[Dict[str, Any]], args) -> List[Dict[str, Any]]:
+    """
+    The rows the subset report shows: its LLM rows, the adaptive baseline rows of its experiments,
+    and those baselines' clean rows again under hidden_apparatus (marked reused_from = clean), since
+    a non-LLM method never reads the apparatus description.
+    """
+    keep = [r for r in rows if r["experiment"] in args.experiments and r["kind"] == "adaptive"
+            and r["condition"] in args.conditions]
+    if "hidden_apparatus" in args.conditions:
+        keep += [{**r, "condition": "hidden_apparatus", "reused_from": "clean"} for r in rows
+                 if r["experiment"] in args.experiments and r["kind"] == "adaptive" and r["condition"] == "clean"
+                 and r["provider"] == "none"]
+    return keep
+
+
 def write_all(rows: List[Dict[str, Any]], out: Path, args, mode: str) -> List[Path]:
     out.mkdir(parents=True, exist_ok=True)
+    if mode == "subset":
+        rows = subset_rows(rows, args)
     rows = sorted(rows, key=lambda r: (r["kind"], r["method"], r["experiment"], r["condition"], r["seed"], r["budget"]))
     runs_csv, summary_csv = out / "benchmark_runs.csv", out / "benchmark_summary.csv"
     write_csv(runs_csv, [_flat(r) for r in rows], PLAN)

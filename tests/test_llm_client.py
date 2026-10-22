@@ -296,7 +296,8 @@ def test_llm_check_reports_each_model(fake_litellm, monkeypatch):
     assert "ERROR gemini/gemini-3.5-flash-lite  rate_limit" in text
     assert "SECRETSECRET" not in text and "test-anthropic-key" not in text
     assert "first working model is gemini/gemini-3.6-flash" in text
-    assert all(c["max_tokens"] == 32 for c in fake_litellm.calls) and len(fake_litellm.calls) == 3
+    # The ping uses the agents' output-token cap, not a special tiny one.
+    assert all(c["max_tokens"] == LLMConfig().max_output_tokens for c in fake_litellm.calls) and len(fake_litellm.calls) == 3
 
 
 def test_llm_check_fails_when_no_model_works(fake_litellm, monkeypatch):
@@ -309,3 +310,77 @@ def test_llm_check_fails_when_no_model_works(fake_litellm, monkeypatch):
     assert "missing_key: missing ANTHROPIC_API_KEY; no request sent" in text
     assert "ERROR gemini/gemini-3.6-flash  timeout" in text
     assert "Chain usable: no" in text
+
+
+# --- Groq JSON mode, pacing and cool-downs (Phase 5.1) ---------------------------------
+
+GROQ = "groq/openai/gpt-oss-120b"
+
+
+def groq_json_failure():
+    """What Groq sends when its JSON mode rejects the model's output: a 400 with an empty generation."""
+    return _litellm().BadRequestError(
+        message='GroqException - {"error":{"message":"Failed to validate JSON. Please adjust your prompt.",'
+                '"type":"invalid_request_error","code":"json_validate_failed","failed_generation":""}}',
+        model="openai/gpt-oss-120b", llm_provider="groq",
+    )
+
+
+def test_llm_check_pings_groq_like_the_agents_do(fake_litellm, monkeypatch):
+    """A reasoning model given a tiny token cap returns nothing, and Groq reports json_validate_failed."""
+    monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
+    fake_litellm.responder = lambda kw: groq_json_failure() if kw["max_tokens"] < 256 else {"ok": True}
+    call = check.check_model(GROQ, LLMConfig())
+    assert call.ok and call.model == GROQ
+    [request] = fake_litellm.calls
+    agent_like = LLMClient(LLMConfig(provider="litellm", model=GROQ, fallbacks=[]))
+    assert request["max_tokens"] == LLMConfig().max_output_tokens
+    assert request["response_format"]["type"] == ("json_schema" if agent_like._mode(GROQ) == "json_schema" else "json_object")
+
+
+def test_a_json_validate_failed_from_groq_is_re_asked_then_reported(fake_litellm, monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
+    fake_litellm.queue(groq_json_failure(), VALID)
+    client, _, _ = make_client(LLMConfig(provider="litellm", model=GROQ, fallbacks=[], cache=False))
+    out = client.complete_json("s", "u", Answer, agent="a", purpose="p")
+    assert out.label == "two"
+    record = client.calls[-1]
+    assert [a.outcome for a in record.attempts] == ["invalid_json", "ok"] and record.json_retries == 1
+    assert "json_validate_failed" in record.validation_errors[0]
+
+    fake_litellm.script.clear()
+    fake_litellm.responder = lambda kw: groq_json_failure()
+    out_text = io.StringIO()
+    code = check.main([GROQ], console=Console(file=out_text, width=250))
+    text = out_text.getvalue()
+    assert code == 1 and f"ERROR {GROQ}  invalid_json: the provider rejected the model's output in JSON mode" in text
+    assert len(fake_litellm.calls) == 2 + 1 + LLMConfig().max_json_retries  # the check re-asks like a run
+
+
+def test_requests_are_paced_across_clients(fake_litellm, monkeypatch):
+    slept = []
+    fake_litellm.responder = lambda kw: VALID
+    cfg = LLMConfig(provider="litellm", model="anthropic/claude-haiku-5-5", fallbacks=[], cache=False,
+                    min_request_interval_s=6.0)
+    for _ in range(3):  # a new client per run, as in the benchmark: the pacing is process-wide
+        client = LLMClient(cfg, sleep=slept.append)
+        client.complete_json("s", "u", Answer, agent="a", purpose="p")
+    assert len(slept) == 2 and all(5.0 < s <= 6.0 for s in slept)
+
+
+def test_a_rate_limited_model_is_skipped_while_it_cools_off(fake_litellm, monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
+    fake_litellm.responder = lambda kw: (error("RateLimitError", "quota exceeded for the day")
+                                         if kw["model"].startswith("gemini") else VALID)
+    cfg = LLMConfig(provider="litellm", model="gemini/gemini-3.5-flash-lite", fallbacks=[GROQ], cache=False,
+                    rate_limit_retries=1)
+    first, _, _ = make_client(cfg)
+    first.complete_json("s", "u", Answer, agent="a", purpose="p")
+    gemini_requests = sum(m.startswith("gemini") for m in fake_litellm.models)
+    assert gemini_requests == 2  # one try and one backoff retry
+    second, _, _ = make_client(cfg)
+    second.complete_json("s", "u", Answer, agent="a", purpose="p")
+    assert sum(m.startswith("gemini") for m in fake_litellm.models) == gemini_requests  # skipped, no request
+    attempt = second.calls[-1].attempts[0]
+    assert attempt.outcome == "rate_limit" and "cooling off" in attempt.error
+    assert second.calls[-1].model == GROQ

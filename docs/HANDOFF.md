@@ -4,7 +4,8 @@ Written for Nikhil. The detailed "what changed / why / how it was verified" for 
 
 **Summary:**
 - **Done:** Phase 2 (with the AST formula fix), then Phases 3 to 7, each with its checkpoint: tests green, CHANGELOG entry, `Phase N: …` commit, tag, push, ROADMAP boxes.
-- **Tests:** 404 pass offline in about 2 minutes (230 at the start).
+- **Then Phase 5.1** (your second request): the `llm.check` fix for Groq, and the free-tier subset benchmark `python -m benchmark.run --subset`, which replaces the paid full real-LLM benchmark. **The full real-LLM benchmark is now optional: it needs paid credit.**
+- **Tests:** 416 pass offline in about 2 minutes (230 at the start).
 - **Not done:** everything that needs your API keys, the Wokwi licence, or a browser. Those are listed below.
 
 **What I never did:**
@@ -22,36 +23,43 @@ Written for Nikhil. The detailed "what changed / why / how it was verified" for 
 | 5 Benchmark | `phase-5-benchmark` | `phase-5` | 367 | 1 of 3 (`--quick` in 142 s); the real-LLM run is yours |
 | 6 Firmware, Wokwi | `phase-6-firmware` | `phase-6` | 391 | 0 of 2, both need Wokwi; firmware compiles, and a full run passes against a fake port |
 | 7 Dashboard | `phase-7-dashboard` | `phase-7` | 404 | 1 of 1 verified headless; please also look in a browser |
+| 5.1 Free-tier subset, `llm.check` fix | `phase-5.1-free-tier` | `phase-5.1` | 416 | code done and tested offline; the subset run itself is yours (needs your free-tier keys and about 2 h) |
 
-Each branch starts from the previous one, so `phase-7-dashboard` contains everything. `main` is still at the initial commit. When you have reviewed it, merging `phase-7-dashboard` into `main` is a fast-forward.
+Each branch starts from the previous one, so `phase-5.1-free-tier` contains everything. `main` is still at the initial commit. When you have reviewed it, merging `phase-5.1-free-tier` into `main` is a fast-forward.
 
 ## Try it
 
 ```bash
 source .venv/bin/activate
-pytest -q                                             # 404 passed
+pytest -q                                             # 416 passed
 streamlit run app/Home.py                             # dashboard: Live Lab, Run History, Benchmark, System
 python main.py --experiment diode_iv --faults default --nonideal --provider mock
 python -m safety.redteam                              # 59 attacks -> results/redteam.csv, 0 unsafe
 python -m benchmark.run --quick                       # about 2 minutes -> results/quick/
+python -m benchmark.run --subset --dry-run            # the free-tier real-LLM subset: plan and estimate only
 ```
 
 Results for the report are in `results/`: `RESULTS.md`, `benchmark_*.csv`, `figures/`, `redteam*.{csv,md}`, `phase3_twin_sweep.csv` and the Phase 1 sweeps. **The LLM-method rows in the benchmark are mock.** RESULTS.md says so at the top.
 
 ## What you must do yourself
 
-1. **Update the `.env` layout.** Your `.env` still has the old Groq/Ollama layout. Copy the layout from `.env.example` (Claude first, then the two Gemini models) and add `ANTHROPIC_API_KEY` and `GEMINI_API_KEY`. I did not touch `.env`.
+1. **`.env`.** Your `.env` now uses the free-tier chain: Gemini Flash-Lite first, then Groq (`gpt-oss-120b`, `gpt-oss-20b`). That is what the subset uses. I did not touch `.env`. `.env.example` shows both layouts (free tier and Claude first).
 2. **Phase 2 checks** (need keys):
-   - `python -m llm.check` should print OK for Claude and Gemini.
+   - `python -m llm.check` should print OK for every model in the chain. **Groq should now say OK too**: the ping used to cap the answer at 32 tokens, which a reasoning model (gpt-oss) spends on thinking. Groq then reported `json_validate_failed` with an empty generation. The ping now asks exactly like the agents do. If a Groq line still fails, the line now says "the provider rejected the model's output in JSON mode"; please send me that line.
    - `python main.py --provider litellm`: then check that the run JSON in `runs/` shows the real prompts, answers, tokens and cost.
-3. **The real-LLM benchmark** (Phase 5 Done-when), with the Claude key in `.env`:
+3. **The real-LLM benchmark: the free-tier subset** (Phase 5.1; this replaces the paid full run for the report):
+   - Look first: `python -m benchmark.run --subset --dry-run`. With your `.env` it plans 72 real-LLM runs (llm_only and autolab; malus_law, inverse_square_law, rc_charging, diode_iv; clean, faults, hidden_apparatus; 3 seeds). It estimates about 1,100 calls, ~670k input and ~60k output tokens, and about 1.8 h at 10 requests per minute. It reuses the 480 non-LLM baseline rows already in `runs/benchmark/full/rows`.
+   - Run it: `python -m benchmark.run --subset`. It goes one run at a time at no more than 10 requests per minute (`--rpm 5` to go slower) and prints a line per run with the models that answered.
+   - **If it stops** with "Stopped: 2 runs in a row found no model available" (exit code 3), a daily limit was reached. Nothing is lost: run the same command again tomorrow and it continues. Ctrl-C is also safe. Do not change `LLM_MODEL`/`LLM_FALLBACKS` halfway: a different chain starts a separate set of rows, so models are never mixed silently.
+   - Output: `results/subset/` (RESULTS.md, the CSVs and the figures, all labelled "Reduced subset, real LLM: <models used>"). Then send me `results/subset/`.
+   - Answers are cached in `llm_cache/`, so rerunning a finished subset costs nothing.
+4. **Optional, needs paid Claude credit: the full real-LLM benchmark.** Use it only if you buy credit and want every experiment and condition with 5 seeds.
+   - Put the Claude-first layout from `.env.example` in `.env`.
    - Look first: `python -m benchmark.run --full --provider litellm --dry-run`.
-   - Small first run (2 seeds, clean twin, about 1,600 calls): `python -m benchmark.run --full --provider litellm --llm-seeds 2 --conditions clean --workers 2`.
-   - Full run: `python -m benchmark.run --full --provider litellm --workers 2`. The mock policies made about 6,700 calls. That is estimated at about $0.6 at litellm's bundled Haiku price, but check the Anthropic Usage page after the first runs.
-   - The Gemini free tier (about 20 per day on Flash) cannot cover this, so Claude credit is needed. Answers are cached, so a rerun is free. The baseline rows are reused; only the LLM methods rerun.
-   - Then send me `results/`.
-4. **Red team against a real model** (optional, cheap): `python -m safety.redteam --provider litellm --out results/redteam_litellm.csv`. It runs the prompt-injection cases only.
-5. **Wokwi** (Phase 6 Done-when):
+   - Then: `python -m benchmark.run --full --provider litellm --workers 2`. The mock policies made about 6,700 calls, estimated at about $0.6 at litellm's bundled Haiku price; check the Anthropic Usage page after the first runs.
+   - The free tiers cannot cover this in reasonable time. The report can rely on the subset instead.
+5. **Red team against a real model** (optional, cheap): `python -m safety.redteam --provider litellm --out results/redteam_litellm.csv`. It runs the prompt-injection cases only.
+6. **Wokwi** (Phase 6 Done-when):
    1. Install the Wokwi Simulator extension in VS Code.
    2. F1, then **Wokwi: Request a New License**.
    3. F1, then **Wokwi: Start Simulator**, and keep its tab visible.
@@ -59,10 +67,10 @@ Results for the report are in `results/`: `RESULTS.md`, `benchmark_*.csv`, `figu
    5. Screenshot the circuit and save it as `docs/img/wokwi_circuit.png`; the System page shows it.
 
    Details are in `docs/wokwi.md`.
-6. **Dashboard in a browser** (Phase 7): run `streamlit run app/Home.py`, start a run on Live Lab, and press E-STOP once mid-run. I checked this headless only.
+7. **Dashboard in a browser** (Phase 7): run `streamlit run app/Home.py`, start a run on Live Lab, and press E-STOP once mid-run. I checked this headless only.
    - To use the real LLM there, also set `APP_PASSWORD` in `.env` and type it into the sidebar.
    - Without a password the dashboard always uses mock, even locally. That is deliberate, to protect the credit on the hosted app.
-7. **Review my judgement calls** (listed below), in particular the step limits and the default fault schedule.
+8. **Review my judgement calls** (listed below), in particular the step limits, the default fault schedule and the subset's 10 requests per minute.
 
 ## Decisions I made
 
@@ -109,6 +117,16 @@ Results for the report are in `results/`: `RESULTS.md`, `benchmark_*.csv`, `figu
 - **Logic lives in `app/lib/`;** the pages only render. A run happens in a background thread, so E-STOP can reach it.
 - **The real LLM needs a key, `APP_PASSWORD`, and the password entered.** Per session: at most 10 runs, at most 3 with a real LLM; budgets capped at 30 measurements (20 with a real LLM).
 
+### Phase 5.1
+- **10 requests per minute by default** (`--rpm`). This is a conservative guess for Gemini Flash-Lite and Groq's free tiers, which I could not check against your account. Raise it if your limits allow; the run then finishes sooner.
+- **Stop after 2 unavailable runs in a row.** One unavailable run can be a short outage; two in a row is almost always a daily limit. Unavailable runs are never stored, so they are retried.
+- **A rate-limited model is skipped for 5 minutes** (after its retries run out) instead of being waited out on every call. Otherwise every call would first sit through Gemini's backoff (two retries, up to 30 s each when the provider asks for it) before reaching Groq.
+- **`json_validate_failed` is re-asked like any invalid answer**, in every run, not only in the check.
+- **Hidden apparatus is clean physics, and the baselines' clean rows stand in for it** (marked `reused_from = clean` in the CSV). A method without an LLM never reads the description, so rerunning them would give identical rows.
+- **Rows are keyed by the model chain**, so if the chain changes (e.g. Gemini removed), the runs start again instead of mixing models. The old rows stay on disk.
+- **No learning curves and no equal-budget stage in the subset**, to save calls. The baselines' equal-budget rows from the mock full run are not shown in the subset report, because their budget came from the mock AutoLab.
+- **3 seeds for the LLM methods, 20 for the baselines.** RESULTS.md adds a "same seeds only" table (seeds 0–2 for every method) so the comparison can also be made on identical seeds.
+
 ### Environment
 - Installed into `.venv`: `hypothesis`, `streamlit` (and its dependencies). Uninstalled: `sympy`.
 - `requirements.txt` was updated to match. Phase 8 still has to pin versions.
@@ -127,3 +145,4 @@ Results for the report are in `results/`: `RESULTS.md`, `benchmark_*.csv`, `figu
 - **Hooke with faults converged on cos² in about 1 run in 5** (cos² over 0–20 "degrees" is almost a straight line). A higher `min_points`, or the predictive-stability criterion, would probably fix it at the cost of measurements. Decide after the real benchmark?
 - **Are the step limits right** for a real spring loader, lamp and voltage source?
 - **Phase 8** (deploy and CI) was outside this run, so it has not started.
+- **Is 3 seeds per cell enough for the paper?** With 3 seeds, a 95% interval on "correct law" spans most of 0 to 1 unless all three agree. If your daily limits allow, `--llm-seeds 5` on a second day adds seeds 3 and 4 to the same rows (the first 3 are reused).

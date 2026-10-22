@@ -59,6 +59,11 @@ def parse_args(argv: Optional[List[str]] = None):
         help="Hide the apparatus description and the variable names from every LLM agent (units and bounds stay)"
     )
     parser.add_argument(
+        "--hide-apparatus",
+        action="store_true",
+        help="Give the agents the variable names and units but no description of the apparatus"
+    )
+    parser.add_argument(
         "--no-cache",
         action="store_true",
         help="Do not serve LLM answers from llm_cache/ (and do not add to it)"
@@ -174,7 +179,7 @@ def build_config(args) -> SystemConfig:
             nonideal=NonIdealityConfig(enabled=args.nonideal),
             faults=parse_faults(args.faults),
         ),
-        agent=AgentConfig(sampler=args.sampler, blind=args.blind),
+        agent=AgentConfig(sampler=args.sampler, blind=args.blind, describe_apparatus=not args.hide_apparatus),
         llm=LLMConfig.model_validate(llm.model_dump()),
         stopping=StoppingConfig(
             max_measurements=args.budget,
@@ -191,6 +196,8 @@ def rerun_command(args, sys_config: SystemConfig, seed: int) -> str:
         rerun += f" --model {args.model}"
     if args.blind:
         rerun += " --blind"
+    if args.hide_apparatus:
+        rerun += " --hide-apparatus"
     if args.budget != StoppingConfig().max_measurements:
         rerun += f" --budget {args.budget}"
     if args.rse_threshold != StoppingConfig().max_rel_se:

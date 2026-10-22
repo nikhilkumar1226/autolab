@@ -27,7 +27,8 @@ METHOD_STYLE = {
 }
 STATUS = {"recovered": "#0ca30c", "detected_not_recovered": "#ec835a", "missed": "#d03b3b",
           "no_effect": "#c3c2b7", "not_reached": "#e1e0d9"}
-CONDITION_LABEL = {"clean": "Clean", "nonideal": "Non-idealities on", "faults": "Faults injected"}
+CONDITION_LABEL = {"clean": "Clean", "nonideal": "Non-idealities on", "faults": "Faults injected",
+                   "hidden_apparatus": "Apparatus hidden"}
 
 
 def _style() -> None:
@@ -212,15 +213,25 @@ def cost_per_run(rows: List[Dict[str, Any]], price: Tuple[float, float], provide
     return _save(fig, out, "fig_cost_per_run", footer + f" INR at {usd_to_inr:g} per USD." + note)
 
 
-def all_figures(rows: List[Dict[str, Any]], args, price, out: Path) -> List[Path]:
-    _style()
-    out.mkdir(parents=True, exist_ok=True)
+def footer_text(args) -> str:
+    """Every figure's footer: data source, who answered for the LLM methods, and the seed caveat."""
+    if getattr(args, "label", None):
+        return (f"Data source: DIGITAL TWIN. {args.label}.\nLLM methods: {args.llm_seeds} seeds; baselines: "
+                f"{args.seeds} seeds (their clean rows stand for apparatus hidden). Differences between the two groups "
+                f"mix method and seed set.")
     provider_text = ("mock provider (deterministic stand-in, not a language model)" if args.provider == "mock"
                      else "LLM via litellm")
     footer = f"Data source: DIGITAL TWIN. LLM methods: {provider_text}."
     if args.provider == "mock":
         footer += (f"\nWith mock, AutoLab = GP only on the same seeds; AutoLab and LLM only use {args.llm_seeds} seeds, "
                    f"the others {args.seeds}, so differences between them here come from the seed sets.")
+    return footer
+
+
+def all_figures(rows: List[Dict[str, Any]], args, price, out: Path) -> List[Path]:
+    _style()
+    out.mkdir(parents=True, exist_ok=True)
+    footer = footer_text(args)
     paths = []
     paths += param_error_vs_n(rows, args.experiments, out, footer)
     paths += law_accuracy(rows, args.conditions, out, footer)
