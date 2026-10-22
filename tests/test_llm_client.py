@@ -63,9 +63,10 @@ def test_mock_provider_answers_from_the_payload_and_logs_the_call(tmp_path):
 
 
 def test_mock_answers_are_validated_like_real_ones(tmp_path):
-    client, _, _ = make_client(LLMConfig(provider="mock", cache_dir=tmp_path))
+    client, calls, _ = make_client(LLMConfig(provider="mock", cache_dir=tmp_path))
     with pytest.raises(ValidationError):
         client.complete_json(SYSTEM, USER, Answer, agent="test", purpose="unit", mock=lambda p: {"value": "x"})
+    assert not calls[0].ok and "ValidationError" in calls[0].error
 
 
 def test_none_provider_raises_not_available(tmp_path):

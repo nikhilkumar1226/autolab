@@ -3,8 +3,13 @@ Run records: one JSON file per run in runs/<run_id>.json.
 
 A record holds everything needed to audit or reproduce a run: config, seed,
 experiment, data-source label, every measurement attempt with the analysis made
-after it, the stop decision and timings. The `experiment` snapshot includes the
-ground truth for benchmark scoring only; it is never passed to agents.
+after it, the stop decision and timings. Since schema 2 it also holds every LLM
+call (prompt, raw answer, parsed answer, models tried, tokens, cost, latency), the
+agents' reasons, the LLM-proposed candidate models and what happened to them, and
+the Writer's discussion. The `experiment` snapshot includes the ground truth for
+benchmark scoring only; it is never passed to agents.
+
+Schema 1 records (Phase 1) still load: every newer field has a default.
 """
 import logging
 from datetime import datetime
@@ -13,18 +18,20 @@ from typing import Dict, List, Literal, Optional, Tuple, Union
 
 from pydantic import BaseModel, Field
 
-from agents.models import GPSuggestion, Hypothesis
+from agents.models import AgentText, AnalystReview, CandidateEvaluation, Discussion, GPSuggestion, Hypothesis
 from analysis.model_library import AnalysisResult
 from analysis.stopping import PointPrediction, StopDecision
 from config import RUNS_DIR, SystemConfig
 from experiments.registry import AgentExperimentView, ExperimentSpec
 from hardware.base import DataSource
+from llm.types import LLMCallRecord, LLMUsage
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
-StepSource = Literal["initial_design", "gp", "random"]
+# planner = a position the Planner chose itself (Phase 2)
+StepSource = Literal["initial_design", "gp", "random", "planner"]
 
 
 class ExperimentSnapshot(BaseModel):
@@ -60,6 +67,12 @@ class StepRecord(BaseModel):
         default=None, description="This measurement as predicted by the best model fitted before it"
     )
     analysis: Optional[AnalysisResult] = Field(default=None, description="Fits after this measurement")
+    review: Optional[AnalystReview] = Field(default=None, description="The Analyst LLM's reading of that analysis")
+    rationale: str = Field(default="", description="Why this position was requested (Planner reason, fallback note)")
+    attempt_in_slot: int = Field(
+        default=1, description="1 = first proposal for this measurement; 2+ = re-proposals or GP fallback after rejections"
+    )
+    llm_call_ids: List[int] = Field(default_factory=list, description="LLM calls behind this step (ids in llm_calls)")
     duration_s: float = 0.0
 
 
@@ -81,6 +94,7 @@ class Timings(BaseModel):
     hardware_s: float = 0.0
     analysis_s: float = 0.0
     gp_s: float = 0.0
+    llm_s: float = 0.0
     report_s: float = 0.0
 
 
@@ -101,6 +115,12 @@ class RunRecord(BaseModel):
     artifacts: Artifacts = Field(default_factory=Artifacts)
     timings: Timings = Field(default_factory=Timings)
     error: Optional[str] = None
+    llm_calls: List[LLMCallRecord] = Field(default_factory=list)
+    llm_usage: LLMUsage = Field(default_factory=LLMUsage)
+    candidate_models: List[CandidateEvaluation] = Field(default_factory=list, description="Every model the Analyst LLM proposed")
+    stop_rationale: Optional[AgentText] = Field(default=None, description="The Planner's explanation; the decision is in `stop`")
+    discussion: Optional[Discussion] = None
+    warnings: List[str] = Field(default_factory=list, description="Problems that did not stop the run, e.g. a failed Writer call")
 
     def measured_points(self) -> Tuple[List[float], List[float]]:
         steps = [s for s in self.steps if s.status == "measured"]

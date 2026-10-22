@@ -61,9 +61,10 @@ class LabTools:
         informative next parameter coordinate.
         """
         if len(self.history_x) < 2:
-            # Not enough points for a GP: propose the midpoint of the search space
+            # Not enough points for a GP: propose the midpoint of the search space, or the
+            # grid point nearest to it that is not close to a measured or rejected position.
             mid = (self.optimizer.min_bound + self.optimizer.max_bound) / 2.0
-            return GPSuggestion(position=round(mid, 2), strategy="initial_midpoint", max_sigma=1.0, mean_sigma=1.0)
+            return GPSuggestion(position=self._nearest_allowed(mid), strategy="initial_midpoint", max_sigma=1.0, mean_sigma=1.0)
 
         strat = AcquisitionStrategy(strategy) if strategy in [s.value for s in AcquisitionStrategy] else AcquisitionStrategy.UNCERTAINTY
         suggestion = self.optimizer.suggest_next_sample(
@@ -76,6 +77,20 @@ class LabTools:
             mean_sigma=suggestion["mean_sigma"],
             acquisition_score=suggestion["acquisition_score"],
         )
+
+    def _nearest_allowed(self, target: float) -> float:
+        """`target`, unless a rejected or measured position is within the GP's novelty distance."""
+        opt = self.optimizer
+        threshold = (opt.max_bound - opt.min_bound) / (opt.resolution * 0.5)
+        taken = np.asarray([*self.history_x, *self.rejected_positions], dtype=float)
+        taken = taken[np.isfinite(taken)]
+        if taken.size == 0 or np.min(np.abs(taken - target)) > threshold:
+            return round(target, 2)
+        grid = opt.candidate_grid.ravel()
+        allowed = grid[np.min(np.abs(grid[:, None] - taken[None, :]), axis=1) > threshold]
+        if allowed.size == 0:
+            return round(target, 2)
+        return round(float(allowed[np.argmin(np.abs(allowed - target))]), 2)
 
     def gp_curve(self, n_points: int = 50) -> Optional[GPCurve]:
         """Current GP posterior on a coarse grid (None before the GP is fitted)."""

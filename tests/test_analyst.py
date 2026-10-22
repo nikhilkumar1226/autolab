@@ -9,7 +9,7 @@ import pytest
 
 from agents.analyst import DataAnalystAgent
 from analysis.model_library import MODEL_LIBRARY, ModelFit, fit_library, fit_model
-from experiments.registry import get_experiment, list_experiments
+from experiments.registry import AgentExperimentView, get_experiment, list_experiments
 
 # (x range, true parameters) for each library model.
 MODEL_CASES = {
@@ -89,4 +89,10 @@ def test_noise_free_fit_has_finite_information_criteria():
 
 def test_analyst_is_never_told_the_experiment():
     assert set(inspect.signature(DataAnalystAgent.analyze).parameters) == {"self", "x_data", "y_data", "iteration"}
-    assert set(inspect.signature(DataAnalystAgent.__init__).parameters) == {"self", "models"}
+    # Phase 2 settings: the LLM client and candidate-model limits, nothing about the experiment.
+    assert set(inspect.signature(DataAnalystAgent.__init__).parameters) == {
+        "self", "models", "client", "max_llm_candidates", "equivalence_sigma", "noise_floor_rel",
+    }
+    # The LLM review gets the fits, the data and the variable view (names, units, bounds), never a spec.
+    assert set(inspect.signature(DataAnalystAgent.review).parameters) == {"self", "analysis", "x", "y", "view", "step"}
+    assert inspect.signature(DataAnalystAgent.review).parameters["view"].annotation is AgentExperimentView

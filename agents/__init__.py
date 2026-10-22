@@ -2,17 +2,35 @@
 Agent models, personas, and orchestrator package.
 """
 from agents.models import (
-    Hypothesis,
-    ExperimentStep,
+    AgentText,
+    AnalystReport,
+    AnalystReview,
+    CandidateEvaluation,
+    Discussion,
     ExecutionOutcome,
-    GPSuggestion,
+    ExperimentStep,
     GPCurve,
+    GPSuggestion,
+    Hypothesis,
+    PlannerOutput,
+    StopRationale,
+    StrategyDecision,
+    WriterOutput,
 )
 
 __all__ = [
-    "Hypothesis",
-    "ExperimentStep",
+    "AgentText",
+    "AnalystReport",
+    "AnalystReview",
+    "CandidateEvaluation",
+    "Discussion",
     "ExecutionOutcome",
-    "GPSuggestion",
+    "ExperimentStep",
     "GPCurve",
+    "GPSuggestion",
+    "Hypothesis",
+    "PlannerOutput",
+    "StopRationale",
+    "StrategyDecision",
+    "WriterOutput",
 ]

@@ -30,6 +30,9 @@ class NoiseSettings(BaseModel):
     std: float = Field(ge=0.0, description="Gaussian measurement noise std, in dependent-variable units")
 
 
+BLIND_DESCRIPTION = "An actuator sets a controlled variable x; a sensor reports a response y."
+
+
 class AgentExperimentView(BaseModel):
     """The only description of an experiment that agents are allowed to see."""
     model_config = ConfigDict(frozen=True)
@@ -38,6 +41,15 @@ class AgentExperimentView(BaseModel):
     independent: VariableSpec
     dependent: VariableSpec
     safe_bounds: Tuple[float, float]
+
+    def blinded(self) -> "AgentExperimentView":
+        """Blind mode: no apparatus text and anonymous variable names. Units and bounds stay."""
+        return AgentExperimentView(
+            description=BLIND_DESCRIPTION,
+            independent=VariableSpec(name="x", symbol="x", units=self.independent.units),
+            dependent=VariableSpec(name="y", symbol="y", units=self.dependent.units),
+            safe_bounds=self.safe_bounds,
+        )
 
 
 class ExperimentSpec(BaseModel):
