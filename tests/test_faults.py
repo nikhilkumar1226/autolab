@@ -29,7 +29,7 @@ from hardware.base import MeasurementResult
 from hardware.safety_guard import HardwareSafetyGuard, SafetyLimits, SafetyViolationError
 from hardware.simulator import PhysicsSimulationRig
 from records.faults import score_faults
-from records.run_record import load_run_record
+from records.run_record import SCHEMA_VERSION, load_run_record
 
 
 def guard_for(name="malus_law", faults=(), spec=None):
@@ -236,7 +236,7 @@ def test_every_experiment_runs_with_faults_and_non_idealities(make_config, name)
     loaded = load_run_record(record.artifacts.record)
     assert loaded.faults == record.faults and loaded.fault_summary == record.fault_summary
     raw = json.loads(Path(record.artifacts.record).read_text(encoding="utf-8"))
-    assert raw["schema_version"] == 3 and all({"status", "detected", "recovered", "missed"} <= set(f) for f in raw["faults"])
+    assert raw["schema_version"] == SCHEMA_VERSION and all({"status", "detected", "recovered", "missed"} <= set(f) for f in raw["faults"])
 
 
 def test_without_faults_the_record_has_no_fault_entries(make_config):

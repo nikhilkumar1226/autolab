@@ -68,7 +68,12 @@ def test_safety_guard_emergency_stop():
     with pytest.raises(SafetyViolationError, match="Emergency Stop"):
         guard.safe_move(45.0)
 
-    guard.reset_estop()
+    with pytest.raises(SafetyViolationError, match="operator's name"):
+        guard.reset_estop(operator="  ")
+    with pytest.raises(SafetyViolationError, match="Emergency Stop"):
+        guard.safe_move(45.0)  # still latched
+
+    guard.reset_estop(operator="test operator")
     res = guard.safe_move(45.0)
     assert res["success"]
 

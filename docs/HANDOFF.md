@@ -10,6 +10,7 @@ Rules I followed: provider `mock` (or `none`) only, no real LLM or paid API was 
 |---|---|---|---|---|
 | 2 (fix) | `phase-2-llm-agents` | `phase-2.1` | 230 passed | 2 of 4 pass; the other 2 need your keys |
 | 3 | `phase-3-digital-twin` | `phase-3` | 311 passed | 2 of 2 pass |
+| 4 | `phase-4-safety` | `phase-4` | 358 passed | 2 of 2 pass (red team: 59 cases, 0 unsafe commands reached the rig) |
 
 ## Decisions I made
 
@@ -31,12 +32,22 @@ Rules I followed: provider `mock` (or `none`) only, no real LLM or paid API was 
 - **Non-idealities are sized relative to each experiment's noise and position tolerance.** Drift was first sized relative to the response span. That was about 5 noise-σ per cycle for the precise diode and wrecked 19/20 runs, so I changed it to 0.3 noise-σ per cycle before the final sweep.
 - **Faults count rig cycles:** one cycle is one reading or one pause, re-measurements included.
 
+### Phase 4 (details in CHANGELOG "Phase 4", standards in docs/safety_and_standards.md)
+- **Simulated rig clock.** The twin keeps simulated time (moves, readings, pauses), so the rate limit and watchdog are reproducible. Hardware uses wall time.
+- **Defaults:** rate limit 5 moves/s; at most 3 moves in a row without a reading (my addition: the rate limit alone cannot stop a slow full-travel oscillation); watchdog 120 s, which is generous because real LLM calls sit between readings on hardware.
+- **Step limits:** 10 N per step for the spring, 1 kK for the filament, 0.4 V for the diode. These are my judgement, not datasheet values; please check them. The GP now proposes only reachable points.
+- **E-stop reset needs an operator name** (`reset_estop(operator="...")`), and it is logged.
+- **The red team uses a scripted adversary** through a new `completion=` hook in `LLMClient`. It replaces only the network call and is not used anywhere else. No real model was called.
+- **The twin now parks at the lowest safe position**, not at 0. A property test found that the LDR read 0 lux after homing and divided by zero.
+
 ## What you must do yourself
 
 1. **`.env` layout.** Your `.env` still has the old Groq/Ollama layout. Copy the layout from `.env.example` (Claude first, then the two Gemini models) and add `ANTHROPIC_API_KEY` and `GEMINI_API_KEY`. I did not touch `.env`.
 2. **Phase 2 open Done-when items** (need keys):
    - `python -m llm.check` → should print OK for Claude and Gemini.
    - `python main.py --provider litellm` → check the run JSON in `runs/` shows the real prompts, responses, tokens and cost.
+
+3. **Red team against a real model** (optional, costs a little): `python -m safety.redteam --provider litellm --out results/redteam_litellm.csv` runs the prompt-injection cases against Claude/Gemini.
 
 ## Open questions
 

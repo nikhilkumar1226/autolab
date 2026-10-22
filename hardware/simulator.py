@@ -22,6 +22,9 @@ Two kinds of information leave the rig:
 - `fault_log`: the ground truth of what was injected and where. Like the true law, it is for
   scoring only; the engine reads it after the run has stopped.
 
+The rig homes (and starts) at its park position, the lowest safe position, so it never reads
+outside the safe bounds (e.g. at 0 lux, where an LDR's law is undefined).
+
 Every random draw comes from the `rng` passed in. With non-idealities off and no faults the
 rig draws exactly one normal number per reading, as in Phase 1, so those runs are unchanged.
 """
@@ -68,15 +71,21 @@ class PhysicsSimulationRig(BaseHardwareRig):
         self._is_busy = False
         self._reset_state()
 
+    @property
+    def park_position(self) -> float:
+        """Where the rig homes to: the lowest safe position (the guard's safe state too), never outside the bounds."""
+        return float(self.spec.safe_bounds[0])
+
     def _reset_state(self) -> None:
-        self._commanded = 0.0       # what the controller was told, and reports
-        self._actual = 0.0          # where the actuator really is
+        self._commanded = self.park_position  # what the controller was told, and reports
+        self._actual = self.park_position     # where the actuator really is
         self._direction = 1.0       # sign of the last move, for backlash
         self._stuck_fault: Optional[int] = None
         self._cycle = 0             # completed cycles (reads and pauses)
         self._drift = 0.0
         self._sample_history: List[MeasurementResult] = []
         self._fault_log: List[FaultEvent] = []
+        self._clock = 0.0            # simulated seconds
 
     @property
     def data_source(self) -> DataSource:
@@ -101,6 +110,10 @@ class PhysicsSimulationRig(BaseHardwareRig):
         self._reset_state()
         return True
 
+    def clock(self) -> float:
+        """Simulated seconds: moves take settle + travel time, readings take the integration time, pauses their length."""
+        return self._clock
+
     def disconnect(self) -> None:
         self._connected = False
 
@@ -113,10 +126,15 @@ class PhysicsSimulationRig(BaseHardwareRig):
         self._is_busy = True
         if self.config.transit_delay_sec > 0:
             time.sleep(self.config.transit_delay_sec)
-        self._commanded = self._actual = 0.0
+        self._clock += self._travel_time(self._commanded, self.park_position)
+        self._commanded = self._actual = self.park_position
         self._is_homed = True
         self._is_busy = False
         return True
+
+    def _travel_time(self, a: float, b: float) -> float:
+        lo, hi = self.spec.safe_bounds
+        return self.config.move_settle_s + self.config.full_travel_s * abs(b - a) / (hi - lo)
 
     # ------------------------------------------------------------------
     def _active(self, kind: str, cycle: int) -> Optional[int]:
@@ -137,6 +155,7 @@ class PhysicsSimulationRig(BaseHardwareRig):
             time.sleep(delay)
 
         position = float(position)
+        self._clock += self._travel_time(self._commanded, position)
         if position != self._commanded:
             self._direction = 1.0 if position > self._commanded else -1.0
         self._commanded = position
@@ -182,6 +201,7 @@ class PhysicsSimulationRig(BaseHardwareRig):
         if not self._connected:
             raise ConnectionError("Cannot read sensor from disconnected rig.")
         ni, spec = self._ni, self.spec
+        self._clock += self.config.read_time_s
         cycle = self._advance_cycle()
 
         if self._stuck_fault is not None and abs(self._actual - self._commanded) > spec.position_tolerance:
@@ -228,6 +248,7 @@ class PhysicsSimulationRig(BaseHardwareRig):
 
     def wait(self, seconds: float) -> None:
         """A pause is one rig cycle: drift moves on and time-limited faults run down. No real sleep."""
+        self._clock += max(0.0, seconds)
         cycle = self._advance_cycle()
         dropout = self._active("sensor_dropout", cycle)
         if dropout is not None:

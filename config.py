@@ -108,6 +108,11 @@ class SimulationConfig(BaseModel):
         description="Override the experiment's default measurement noise std (None = use the spec's default)"
     )
     transit_delay_sec: float = Field(default=0.05, ge=0.0, description="Simulated motor transit latency")
+    # Simulated time (the twin's clock), used by the safety guard's rate limit and watchdog. It advances
+    # whether or not transit_delay_sec makes the twin really sleep, so safety timing is reproducible.
+    move_settle_s: float = Field(default=0.05, ge=0.0, description="Simulated time per move, plus travel time")
+    full_travel_s: float = Field(default=0.5, ge=0.0, description="Simulated time to travel the whole safe range")
+    read_time_s: float = Field(default=0.2, ge=0.0, description="Simulated sensor integration time per reading")
     nonideal: NonIdealityConfig = Field(default_factory=NonIdealityConfig)
     faults: List[FaultSpec] = Field(default_factory=list, description="Injected faults (digital twin only)")
 
@@ -171,6 +176,22 @@ class LLMConfig(BaseModel):
     def chain(self) -> List[str]:
         """The model priority order, without duplicates."""
         return list(dict.fromkeys([self.model, *self.fallbacks]))
+
+class SafetyConfig(BaseModel):
+    """Safety-guard limits that are not experiment-specific (bounds and step size come from the spec)."""
+    max_moves_per_s: float = Field(
+        default=5.0, gt=0.0,
+        description="Rate limit: at most this many actuator moves in any 1 s window of the rig's clock"
+    )
+    max_moves_without_reading: int = Field(
+        default=3, ge=1,
+        description="Oscillation interlock: at most this many moves in a row without a sensor reading"
+    )
+    watchdog_s: float = Field(
+        default=120.0, gt=0.0,
+        description="Latch the E-stop if the rig has gone this long (rig clock) without a valid reading. Generous, "
+                    "because on hardware the rig clock is wall time and includes LLM latency between readings"
+    )
 
 class AgentConfig(BaseModel):
     initial_sample_count: int = Field(default=4, ge=2, description="Number of initial exploration points before active learning")
@@ -242,6 +263,7 @@ class SystemConfig(BaseModel):
     agent: AgentConfig = Field(default_factory=AgentConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     stopping: StoppingConfig = Field(default_factory=StoppingConfig)
+    safety: SafetyConfig = Field(default_factory=SafetyConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
 
     @field_validator("experiment")

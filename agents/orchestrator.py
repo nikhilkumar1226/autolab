@@ -34,7 +34,7 @@ import secrets
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -43,7 +43,7 @@ from experiments.registry import AgentExperimentView, ExperimentSpec, get_experi
 from hardware.base import BaseHardwareRig
 from hardware.simulator import PhysicsSimulationRig
 from hardware.serial_driver import SerialHardwareRig
-from hardware.safety_guard import HardwareSafetyGuard, SafetyLimits
+from hardware.safety_guard import EmergencyStopActive, HardwareSafetyGuard, SafetyLimits, _finite_real
 from optimization.bayesian_opt import ActiveLearningEngine
 from optimization.baselines import RandomSampler
 from agents.models import AgentText, AnomalyHandling, Discussion, GPSuggestion
@@ -141,15 +141,30 @@ class DiscoveryEngine:
         sys_config: Optional[SystemConfig] = None,
         on_event: Optional[EventCallback] = None,
         spec: Optional[ExperimentSpec] = None,
+        rig_wrapper: Optional[Callable[[BaseHardwareRig], BaseHardwareRig]] = None,
+        llm_completion: Optional[Callable[..., Any]] = None,
     ):
         self.config = sys_config or default_config
         # `spec` overrides the registry entry (tests and benchmark variants).
         self.spec = spec or get_experiment(self.config.experiment)
         self.on_event = on_event
+        # Red-team hooks: a wrapper around the rig (e.g. a spy that records every command that reaches
+        # it) and a stand-in for litellm.completion (a scripted adversarial model). Neither changes the guard.
+        self.rig_wrapper = rig_wrapper
+        self.llm_completion = llm_completion
+        self._active_guard: Optional[HardwareSafetyGuard] = None
 
         # Reporting
         self.visualizer = ScienceVisualizer(self.config.output.plots_dir)
         self.paper_generator = SciencePaperGenerator(self.config.output.reports_dir)
+
+    def emergency_stop(self, reason: str = "operator") -> bool:
+        """Latch the E-stop of the run in progress (e.g. from the dashboard's E-STOP button). False if none runs."""
+        guard = self._active_guard
+        if guard is None:
+            return False
+        guard.emergency_stop(reason)
+        return True
 
     def _build_rig(self, rng: np.random.Generator) -> BaseHardwareRig:
         if self.config.hardware.simulate:
@@ -177,7 +192,9 @@ class DiscoveryEngine:
         rig = self._build_rig(np.random.default_rng(sim_seq))
         # Limits come from the spec only, and are fixed before any agent is asked anything.
         lo, hi = self.spec.safe_bounds
-        guard = HardwareSafetyGuard(rig, SafetyLimits.from_spec(self.spec))
+        guarded = self.rig_wrapper(rig) if self.rig_wrapper is not None else rig
+        guard = HardwareSafetyGuard(guarded, SafetyLimits.from_spec(self.spec, cfg.safety))
+        self._active_guard = guard
         optimizer = ActiveLearningEngine(min_bound=lo, max_bound=hi, random_state=int(gp_seq.generate_state(1)[0]))
         tools = LabTools(guard, optimizer, cfg.agent.anomaly)
 
@@ -205,7 +222,7 @@ class DiscoveryEngine:
                 latency_s=call.latency_s, error=call.error,
             )
 
-        client = LLMClient(cfg.llm, rng=np.random.default_rng(llm_seq), on_call=on_call)
+        client = LLMClient(cfg.llm, rng=np.random.default_rng(llm_seq), on_call=on_call, completion=self.llm_completion)
         run = _Run(
             record=record,
             events=events,
@@ -245,6 +262,7 @@ class DiscoveryEngine:
             raise
         finally:
             guard.disconnect()
+            self._active_guard = None
         return record
 
     def _experiment_loop(self, run: _Run) -> None:
@@ -283,7 +301,14 @@ class DiscoveryEngine:
             if n >= cfg.stopping.max_measurements:
                 decision = self._stop_check(run, n)
                 break
-            measured, decision = self._slot(run, queue)
+            try:
+                measured, decision = self._slot(run, queue)
+            except EmergencyStopActive:
+                measured, decision = False, None
+            if run.guard.estop_active:
+                decision = self._stop_check(run, len(tools.history_x), override=StopReason.SAFETY_ABORT).model_copy(
+                    update={"message": f"aborted: E-stop latched ({run.guard.estop_reason})"})
+                break
             if measured:
                 failed_slots = 0
                 if decision is not None and decision.should_stop:
@@ -321,6 +346,8 @@ class DiscoveryEngine:
             if step.status != "rejected":
                 return False, None  # actuator or driver error: no re-proposal
 
+            if run.guard.estop_active:
+                return False, None  # nothing moves until an operator resets it; the loop aborts the run
             observation = {"rejected_position": step.requested_position, "guard_message": step.message, "attempt": attempt}
             run.rejections.append(observation)
             if run.has_llm and reproposals < max_reproposals:
@@ -490,7 +517,7 @@ class DiscoveryEngine:
         step = StepRecord(
             index=index,
             source=proposal.source,
-            requested_position=position if math.isfinite(position) else None,
+            requested_position=_finite_real(position),
             status=outcome.status,
             position=outcome.position,
             value=outcome.value,
@@ -620,6 +647,7 @@ class DiscoveryEngine:
         record.artifacts.report_tex = str(self.paper_generator.generate_latex_paper(record))
 
     def _save(self, run: _Run) -> None:
+        run.record.audit_log = list(run.guard.audit_entries)
         runs_dir = self.config.output.runs_dir
         run.record.artifacts.record = str(record_path(run.record.run_id, runs_dir))
         save_run_record(run.record, runs_dir)

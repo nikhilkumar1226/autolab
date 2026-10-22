@@ -49,6 +49,7 @@ python main.py --experiment malus_law                   # one run, CLI
 python main.py --experiment malus_law --provider mock   # no API key needed
 python main.py --experiment diode_iv --faults default --nonideal   # digital twin with faults and non-idealities
 python -m scripts.twin_sweep                            # seeded fault/non-ideality sweep -> results/
+python -m safety.redteam                                # red-team suite -> results/redteam.csv (0 unsafe commands)
 streamlit run app/Home.py                               # dashboard (after Phase 7)
 python -m benchmark.run --quick                         # benchmark (after Phase 5)
 ```

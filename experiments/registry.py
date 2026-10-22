@@ -265,7 +265,8 @@ EXPERIMENTS: Dict[str, ExperimentSpec] = {
             independent=VariableSpec(name="forward voltage", symbol="V", units="V"),
             dependent=VariableSpec(name="diode current", symbol="I", units="mA"),
             safe_bounds=(0.0, 0.8),
-            max_step_delta=0.8,
+            # At most 0.4 V per step: never jump straight from 0 V to the top of the curve.
+            max_step_delta=0.4,
             noise=NoiseSettings(std=0.01),
             sensor_range=(-50.0, 50.0),
             sensor_resolution=0.001,
@@ -307,7 +308,8 @@ EXPERIMENTS: Dict[str, ExperimentSpec] = {
             independent=VariableSpec(name="applied force", symbol="F", units="N"),
             dependent=VariableSpec(name="end position", symbol="L", units="mm"),
             safe_bounds=(0.0, 20.0),
-            max_step_delta=20.0,
+            # At most 10 N per step: no shock loading of the spring.
+            max_step_delta=10.0,
             noise=NoiseSettings(std=0.2),
             sensor_range=(0.0, 300.0),
             sensor_resolution=0.1,
@@ -327,7 +329,8 @@ EXPERIMENTS: Dict[str, ExperimentSpec] = {
             independent=VariableSpec(name="filament temperature", symbol="T", units="kK"),
             dependent=VariableSpec(name="detected power", symbol="P", units="mW"),
             safe_bounds=(0.8, 2.8),
-            max_step_delta=2.0,
+            # At most 1 kK per step: limits thermal shock to the filament.
+            max_step_delta=1.0,
             noise=NoiseSettings(std=0.5),
             sensor_range=(0.0, 400.0),
             sensor_resolution=0.01,

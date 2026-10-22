@@ -154,8 +154,12 @@ class LLMClient:
         rng: Optional[np.random.Generator] = None,
         on_call: Optional[CallSink] = None,
         sleep: Callable[[float], None] = time.sleep,
+        completion: Optional[Callable[..., Any]] = None,
     ):
         self.cfg = cfg
+        # A stand-in for litellm.completion (the red-team harness uses a scripted adversary). It
+        # replaces only the network request; parsing, validation, retries and the chain are unchanged.
+        self._completion = completion
         # Only used for backoff jitter; the engine passes a Generator derived from the run seed.
         self._rng = rng if rng is not None else np.random.default_rng()
         self._on_call = on_call
@@ -177,7 +181,7 @@ class LLMClient:
 
     def assert_ready(self) -> None:
         """Fail fast, before any hardware moves, if no model in the chain can be called."""
-        if self.provider != "litellm":
+        if self.provider != "litellm" or self._completion is not None:
             return
         problems = {m: missing_keys(m) for m in self.cfg.chain}
         if all(problems.values()):
@@ -274,7 +278,7 @@ class LLMClient:
         # 2. The network, model by model.
         record.cost_usd = 0.0
         for model in chain:
-            missing = missing_keys(model)
+            missing = missing_keys(model) if self._completion is None else []
             if missing:
                 record.attempts.append(ModelAttempt(
                     model=model, outcome="missing_key", error=f"missing {', '.join(missing)}; no request sent",
@@ -307,7 +311,7 @@ class LLMClient:
         while True:
             t0 = time.perf_counter()
             try:
-                response = litellm.completion(
+                response = (self._completion or litellm.completion)(
                     model=model, messages=messages, temperature=self.cfg.temperature,
                     max_tokens=self.cfg.max_output_tokens, timeout=self.cfg.timeout_s,
                     response_format=response_format, num_retries=0,

@@ -41,6 +41,18 @@ def twin_line(record: RunRecord) -> str:
     text = describe_twin(record.config)
     return f"Digital twin: {text}." if text else ""
 
+def audit_line(record: RunRecord) -> str:
+    """One line on the safety guard's audit log."""
+    log = record.audit_log
+    if not log:
+        return "Safety audit log: not recorded."
+    rejected = sum(e.decision == "rejected" for e in log)
+    tripped = [e for e in log if e.decision == "tripped"]
+    text = (f"Safety audit log: {len(log)} guard decisions, {rejected} rejected"
+            + (f", {len(tripped)} safety trip(s) ({'; '.join(e.reason for e in tripped)})" if tripped else "")
+            + f"; hash chain {'intact' if record.audit_intact() else 'BROKEN'}.")
+    return text
+
 def _anomalies_md(record: RunRecord) -> str:
     flagged = [s for s in record.steps if s.status == "anomaly"]
     if not flagged:
@@ -305,6 +317,8 @@ class SciencePaperGenerator:
 {obs_rows}
 **Rejected or failed attempts:**
 {rejected_md}
+{audit_line(record)}
+
 {_anomalies_md(record)}{_faults_md(record)}
 ## 4. Model comparison
 | Rank | Model | Formula | k | BIC | ΔBIC | $R^2$ | RMSE |
