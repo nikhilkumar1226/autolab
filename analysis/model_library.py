@@ -50,6 +50,13 @@ class ModelFit(BaseModel):
     params: Dict[str, float]
     std_errors: Dict[str, Optional[float]] = Field(description="None when the covariance is undefined")
     rel_std_errors: Dict[str, Optional[float]] = Field(description="Kind-normalised; None when undefined")
+    covariance: Optional[List[List[float]]] = Field(
+        default=None, description="Parameter covariance (curve_fit, scaled by the residual variance); None if undefined"
+    )
+    redundant: Optional[str] = Field(
+        default=None,
+        description="Why this fit is not counted as a competitor (parsimony: more parameters, same curve as a simpler model)",
+    )
     r2: float
     rmse: float
     aic: float
@@ -69,19 +76,32 @@ class SkippedModel(BaseModel):
 class AnalysisResult(BaseModel):
     iteration: int
     n_points: int
-    fits: List[ModelFit] = Field(description="Successful fits, ranked by BIC (best first)")
+    fits: List[ModelFit] = Field(description="Successful fits, ranked by BIC (lowest first)")
     skipped: List[SkippedModel] = Field(default_factory=list)
     delta_bic_runner_up: Optional[float] = Field(
-        default=None, description="BIC(runner-up) - BIC(best); None with fewer than two fits"
+        default=None,
+        description="BIC(runner-up) - BIC(best), both counted competitors; None with fewer than two",
     )
 
     @property
+    def competitors(self) -> List[ModelFit]:
+        """Fits that count in the ranking: all of them, except fits marked redundant by parsimony."""
+        return [f for f in self.fits if f.redundant is None]
+
+    @property
     def best(self) -> Optional[ModelFit]:
-        return self.fits[0] if self.fits else None
+        counted = self.competitors
+        return counted[0] if counted else None
 
     @property
     def runner_up(self) -> Optional[ModelFit]:
-        return self.fits[1] if len(self.fits) > 1 else None
+        counted = self.competitors
+        return counted[1] if len(counted) > 1 else None
+
+    @property
+    def only_redundant_rivals(self) -> bool:
+        """Every other fit reproduces the best model's curve with more parameters (see analysis.parsimony)."""
+        return self.best is not None and self.runner_up is None and len(self.fits) > 1
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +186,21 @@ def _exp_decay_bounds(x, y):
     xs = max(_span(x), 1e-12)
     return [-np.inf, 1e-6 / xs, -np.inf], [np.inf, 50.0 / xs, np.inf]
 
+# --- growing exponential: y = A exp(k x) + C, k > 0 (e.g. a diode's Shockley law, C = -A) ---
+def _exp_growth(x, A, k, C):
+    return A * np.exp(k * x) + C
+
+def _exp_growth_guess(x, y):
+    xs = max(_span(x), 1e-12)
+    x_max = float(np.max(x))
+    # Basis shifted to x_max for conditioning; A is converted back below.
+    A_shift, k, C = _profile(lambda xx, kk: np.exp(kk * (xx - x_max)), np.geomspace(0.1 / xs, 50.0 / xs, 50), x, y)
+    return [A_shift * math.exp(-k * x_max), k, C]
+
+def _exp_growth_bounds(x, y):
+    xs = max(_span(x), 1e-12)
+    return [-np.inf, 1e-6 / xs, -np.inf], [np.inf, 60.0 / xs, np.inf]
+
 # --- cos^2 with phase (x in degrees): y = A cos^2(pi (x - x0) / 180) + C ---
 def _cos2_phase(x, A, x0, C):
     return A * np.cos(np.radians(x - x0)) ** 2 + C
@@ -241,10 +276,17 @@ MODEL_LIBRARY: Dict[str, CandidateModel] = {
             latex=lambda p: f"y = {_num(p['a'])}\\,x^2 {_plus(p['b'])}\\,x {_plus(p['c'])}",
         ),
         CandidateModel(
-            key="exp_decay", name="Exponential decay", formula="y = A*exp(-k*x) + C",
+            # A > 0 decays towards C (absorption); A < 0 rises towards C (a charging capacitor).
+            key="exp_decay", name="Decaying exponential", formula="y = A*exp(-k*x) + C",
             param_names=("A", "k", "C"), param_kinds=("scale", "scale", "y_offset"),
             func=_exp_decay, initial_guess=_exp_decay_guess, bounds=_exp_decay_bounds,
             latex=lambda p: f"y = {_num(p['A'])}\\,e^{{-{_num(p['k'])}\\,x}} {_plus(p['C'])}",
+        ),
+        CandidateModel(
+            key="exp_growth", name="Growing exponential", formula="y = A*exp(k*x) + C",
+            param_names=("A", "k", "C"), param_kinds=("scale", "scale", "y_offset"),
+            func=_exp_growth, initial_guess=_exp_growth_guess, bounds=_exp_growth_bounds,
+            latex=lambda p: f"y = {_num(p['A'])}\\,e^{{{_num(p['k'])}\\,x}} {_plus(p['C'])}",
         ),
         CandidateModel(
             key="cos2_phase", name="Cosine-squared with phase", formula="y = A*cos^2(pi*(x - x0)/180) + C",
@@ -340,6 +382,7 @@ def fit_model(model: CandidateModel, x: np.ndarray, y: np.ndarray) -> Union[Mode
         params=params,
         std_errors=std_errors,
         rel_std_errors=rel_std_errors,
+        covariance=pcov.tolist() if np.all(np.isfinite(pcov)) else None,
         r2=1.0 - ssr / sst if sst > 0 else 0.0,
         rmse=math.sqrt(ssr / n),
         aic=aic,

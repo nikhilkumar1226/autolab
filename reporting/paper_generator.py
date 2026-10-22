@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import List, Optional
 from analysis.model_library import AnalysisResult, ModelFit
 from analysis.stopping import CriterionCheck, StopDecision
+from config import describe_twin
 from records.run_record import RunRecord
 
 def _fmt(v: Optional[float], spec: str = ".4g") -> str:
@@ -34,6 +35,42 @@ def _sampler_text(record: RunRecord) -> str:
         return gp
     return (f"before each measurement the Planner agent chose between {gp} and a point of its own, "
             "giving a reason each time (Section 7)")
+
+def twin_line(record: RunRecord) -> str:
+    """The digital twin's settings, for the report header (empty for hardware)."""
+    text = describe_twin(record.config)
+    return f"Digital twin: {text}." if text else ""
+
+def _anomalies_md(record: RunRecord) -> str:
+    flagged = [s for s in record.steps if s.status == "anomaly"]
+    if not flagged:
+        return "**Flagged readings:** none.\n"
+    rows = ["**Flagged readings** (never used in the fits):\n",
+            "| Attempt | x | Reading | Flags | Then | Decided by | Reason |",
+            "| :---: | :---: | :---: | :--- | :---: | :---: | :--- |"]
+    for s in flagged:
+        h = s.anomaly
+        who = "" if h is None else h.decided_by + (f" ({_by(h.source, h.model)})" if h.source else "")
+        rows.append(f"| {s.index} | {_fmt(s.requested_position, '.4g')} | {_fmt(s.value, '.4g')} | {', '.join(s.flags)} | "
+                    f"{h.action if h else ''} | {who} | {_cell(h.reason) if h else ''} |")
+    return "\n".join(rows) + "\n"
+
+def _faults_md(record: RunRecord) -> str:
+    if not record.faults:
+        return ""
+    rows = ["\n**Injected faults and random outliers**, scored after the run against the digital twin's fault log "
+            "(ground truth that detection never sees):\n",
+            "| Fault | Cycle | Status | Detected | Recovered | Missed | Flags | Then |",
+            "| :--- | :---: | :---: | :---: | :---: | :---: | :--- | :---: |"]
+    for f in record.faults:
+        rows.append(f"| {f.type}{'' if f.scheduled else ' (random outlier)'} | {f.at_cycle} | {f.status} | "
+                    f"{'yes' if f.detected else 'no'} | {'yes' if f.recovered else 'no'} | {'yes' if f.missed else 'no'} | "
+                    f"{', '.join(f.flags)} | {f.resolution or ''} |")
+    s = record.fault_summary
+    if s is not None and s.unexplained:
+        rows.append("\nFlagged readings at cycles where nothing was injected (false alarms): "
+                    + ", ".join(f"{k} x{v}" for k, v in s.unexplained.items()) + ".")
+    return "\n".join(rows) + "\n"
 
 def _cell(text: str) -> str:
     """Agent text inside a Markdown table cell."""
@@ -194,7 +231,7 @@ class SciencePaperGenerator:
             f"| {s.index} | {s.source} | {_fmt(s.position, '.2f')} | {_fmt(s.value, '.2f')} |\n"
             for s in record.steps if s.status == "measured"
         )
-        rejected = [s for s in record.steps if s.status != "measured"]
+        rejected = [s for s in record.steps if s.status in ("rejected", "error")]
         rejected_md = "".join(
             f"- Attempt {s.index} ({s.source}) at {_fmt(s.requested_position, '.2f')}: **{s.status}**: {s.message}\n"
             for s in rejected
@@ -204,7 +241,8 @@ class SciencePaperGenerator:
         skipped_md = "None.\n"
         if analysis is not None:
             model_rows = "".join(
-                f"| {rank} | {f.name} | `{f.formula}` | {f.n_params} | {f.bic:.2f} | {f.delta_bic:.2f} | {f.r2:.4f} | {f.rmse:.3f} |\n"
+                f"| {rank} | {f.name}{' (not counted: ' + f.redundant + ')' if f.redundant else ''} | `{f.formula}` | "
+                f"{f.n_params} | {f.bic:.2f} | {f.delta_bic:.2f} | {f.r2:.4f} | {f.rmse:.3f} |\n"
                 for rank, f in enumerate(analysis.fits, 1)
             )
             if analysis.skipped:
@@ -234,6 +272,8 @@ class SciencePaperGenerator:
 > **Data source: {record.data_source.value}**
 >
 > {agents_line(record)}
+>
+> {twin_line(record)}
 
 **Run ID:** `{record.run_id}`
 **Started (UTC):** {record.started_at:%Y-%m-%d %H:%M:%S}
@@ -255,6 +295,7 @@ class SciencePaperGenerator:
 - **Independent variable (x):** {view.independent.name} ({view.independent.units}), safe range [{view.safe_bounds[0]:g}, {view.safe_bounds[1]:g}]
 - **Dependent variable (y):** {view.dependent.name} ({view.dependent.units})
 - **Sampling:** an initial design of {record.config.agent.initial_sample_count} points across the safe range, then {_sampler_text(record)}. Every position passed through the hardware safety guard.
+- **Reading checks:** the safety guard flags a reading that is not a number, times out, reaches the sensor's full scale, disagrees with the actuator's position feedback, exceeds the response limit, or lies far outside the predictive band of the current best fit. A flagged reading is never used: it is re-measured once, then the Analyst decides to re-measure, pause or discard the position.
 - **Blind analysis:** the analyst saw only the measured (x, y) pairs, not the experiment or its true law. It fitted every model in a fixed library of candidates by nonlinear least squares and ranked them by the Bayesian Information Criterion, BIC = n ln(SSR/n) + k ln n.
 - **Stopping rule:** stop when the best model beats the runner-up by ΔBIC ≥ {stopping.delta_bic_threshold:g}, every parameter's relative standard error is below {stopping.max_rel_se:.0%}, and at least {stopping.min_points} points exist; otherwise stop at the budget of {stopping.max_measurements} measurements. Relative SE is SE/|value| for scale parameters, and SE divided by the measured x- or y-span for location and offset parameters.{_stability_text(stopping)}
 
@@ -264,6 +305,7 @@ class SciencePaperGenerator:
 {obs_rows}
 **Rejected or failed attempts:**
 {rejected_md}
+{_anomalies_md(record)}{_faults_md(record)}
 ## 4. Model comparison
 | Rank | Model | Formula | k | BIC | ΔBIC | $R^2$ | RMSE |
 | :---: | :--- | :--- | :---: | :---: | :---: | :---: | :---: |
@@ -375,6 +417,8 @@ class SciencePaperGenerator:
 \\noindent\\fbox{{\\textbf{{Data source: {esc(record.data_source.value)}}}}}\\quad Run \\texttt{{{esc(record.run_id)}}}, seed {record.seed}.
 
 \\noindent {esc(agents_line(record))}
+
+\\noindent {esc(twin_line(record))}
 
 \\begin{{abstract}}
 {summary}

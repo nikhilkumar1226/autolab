@@ -34,10 +34,10 @@ TEST_CHAIN = ["anthropic/claude-haiku-5-5", "gemini/gemini-3.6-flash", "gemini/g
 def make_config(tmp_path):
     def _make(experiment: str = "malus_law", seed: int = 0, write_report: bool = False, **overrides) -> SystemConfig:
         overrides.setdefault("llm", LLMConfig(provider="mock", cache_dir=tmp_path / "llm_cache"))
+        overrides.setdefault("simulation", SimulationConfig(transit_delay_sec=0.0))
         return SystemConfig(
             experiment=experiment,
             seed=seed,
-            simulation=SimulationConfig(transit_delay_sec=0.0),
             output=OutputConfig(
                 runs_dir=tmp_path / "runs",
                 plots_dir=tmp_path / "plots",

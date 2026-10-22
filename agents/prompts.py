@@ -6,7 +6,8 @@ What each agent sees:
 - Planner: the research question, the apparatus description, variable names and units,
   the safe bounds; later the data, the ranked fits, the unmet stopping criteria, the GP
   suggestion, the point where the two best models disagree most, and guard rejections.
-- Analyst: variable names and units, the data, the fit table and residual diagnostics.
+- Analyst: variable names and units, the data, the fit table and residual diagnostics;
+  for a flagged reading, the flags, the readings at that position and the GP's expected band.
   Never the apparatus description, the question, the hypothesis or the experiment name.
 - Writer: the facts extracted from the run record (writer.build_facts).
 With --blind, names become x and y and the description is generic (units and bounds stay).
@@ -18,7 +19,7 @@ import json
 import math
 from typing import Any
 
-PROMPT_VERSION = "phase2-v2"
+PROMPT_VERSION = "phase3-v1"
 
 PLANNER_SYSTEM = """You are the Planner of AutoLab, an autonomous laboratory that discovers how a measured quantity depends on one controlled variable.
 The input JSON gives the research question, the apparatus, the variables with units, and safe_bounds.
@@ -47,6 +48,15 @@ Return JSON with:
 - residual_comment: one sentence on the residuals;
 - candidate_model: null, or ONE new model not already in the table, when the residuals suggest one is missing: {"name", "expression", "parameters": [{"name", "initial_guess"}] (1-4), "rationale"}. The expression is plain arithmetic in x (at most 200 characters) using only numbers, x, your parameter names, pi, e, + - * / ** and unary minus, and one-argument calls to sin, cos, tan, exp, log, sqrt, abs, radians (trigonometric functions take radians). Anything else is rejected.
 If candidate_slots_left is 0, candidate_model must be null. previous_proposals lists your earlier models and what happened to them."""
+
+ANOMALY_SYSTEM = """You are the Analyst of AutoLab. Hard-coded checks flagged a reading at the same position twice in a row; the first time it was re-measured automatically. You decide what happens next.
+Flags: non_finite (no number: e.g. a sensor dropout), timeout (the sensor did not answer), saturated (at the sensor's full scale), out_of_range (below the sensor's range), position_mismatch (the actuator's position feedback disagrees with the commanded position), outlier (far outside both the band a Gaussian-process surrogate expected and the current best model's prediction).
+The input JSON has the position, the flags, the readings taken at this position (null = no number), the expected bands (source gp = the surrogate, model = the current best fit; mean and sigma), the position feedback and how many decisions are left before the position is given up.
+Choose one action:
+- "remeasure": read again now (e.g. the actuator may now reach the position, or a spike may have passed);
+- "pause": wait briefly, then read again (e.g. for a transient sensor dropout);
+- "discard": give up this position; the next measurement will be at another position.
+You cannot accept a flagged reading or change the checks. Return JSON: {"action": "remeasure" | "pause" | "discard", "reason": one sentence}."""
 
 STOP_SYSTEM = """You are the Planner of AutoLab. A fixed numerical rule has stopped the experiment; you do not decide whether to stop.
 Explain the decision for the report in 2-4 sentences: which criteria were met or not, and what that means for confidence in the result. Use only the numbers in the input JSON.

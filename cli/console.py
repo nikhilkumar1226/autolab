@@ -10,6 +10,7 @@ from rich.table import Table
 
 from agents.events import (
     AnalysisCompleted,
+    AnomalyDetected,
     EngineEvent,
     GPUpdated,
     HypothesisProposed,
@@ -56,7 +57,8 @@ class ConsoleEventPrinter:
             f"[yellow]Question:[/yellow] {escape(e.question)}\n"
             f"[yellow]Seed:[/yellow] {e.seed}   [yellow]Budget:[/yellow] {e.budget} measurements   "
             f"[yellow]Sampler:[/yellow] {e.sampler}\n"
-            f"[yellow]Agents:[/yellow] {escape(e.llm)}"
+            + (f"[yellow]Digital twin:[/yellow] {escape(e.twin)}\n" if e.twin else "")
+            + f"[yellow]Agents:[/yellow] {escape(e.llm)}"
             + ("   [yellow]Blind mode:[/yellow] on (names and apparatus hidden from the agents)" if e.blind else ""),
             border_style="cyan",
         ))
@@ -84,6 +86,15 @@ class ConsoleEventPrinter:
         then = {"planner": " -> fed back to the Planner", "gp": " -> GP fallback"}.get(e.fed_back_to or "", "")
         self.console.print(
             f"[bold red]{escape(f'[step {e.step:02d}]')} SAFETY REJECTION[/bold red] ({e.source}): {escape(e.reason)}{then}"
+        )
+
+    def _on_anomaly(self, e: AnomalyDetected) -> None:
+        h = e.handling
+        value = "no reading" if e.value is None else f"y = {e.value:.4g} {self._units_y}"
+        who = h.decided_by if h.decided_by != "analyst" else f"analyst ({_by(h.source or 'heuristic', h.model)})"
+        self.console.print(
+            f"[bold yellow]{escape(f'[step {e.step:02d}]')} FLAGGED[/bold yellow] ({', '.join(e.flags)}) at "
+            f"x = {e.position:.4g} {self._units_x}, {value} -> {h.action} {escape(f'[{who}]')}: {escape(h.reason)}"
         )
 
     def _on_strategy(self, e: StrategyDecided) -> None:
@@ -163,7 +174,8 @@ class ConsoleEventPrinter:
         table.add_column("R²", justify="right")
         if analysis is not None:
             for rank, f in enumerate(analysis.fits, 1):
-                table.add_row(str(rank), f.name, f"{f.bic:.2f}", f"{f.delta_bic:.2f}", f"{f.r2:.4f}")
+                name = f.name if f.redundant is None else f"[dim]{escape(f.name)} (not counted: parsimony)[/dim]"
+                table.add_row(str(rank), name, f"{f.bic:.2f}", f"{f.delta_bic:.2f}", f"{f.r2:.4f}")
             for s in analysis.skipped:
                 table.add_row("-", f"[dim]{escape(s.name)}[/dim]", "[dim]skipped[/dim]", "", f"[dim]{escape(s.reason)}[/dim]")
         self.console.print(table)
@@ -192,6 +204,19 @@ class ConsoleEventPrinter:
                 f"\n[bold]LLM usage:[/bold] {u.calls} calls ({u.cached_calls} cached, {u.failed_calls} failed): {escape(models)}; "
                 f"{u.input_tokens} in / {u.output_tokens} out tokens; {cost}"
             )
+        if e.faults:
+            table = Table(title="Injected faults and outliers (scored against the twin's fault log)")
+            for column in ("Fault", "Cycle", "Status", "Flags", "Then"):
+                table.add_column(column)
+            for f in e.faults:
+                colour = {"recovered": "green", "missed": "red", "detected_not_recovered": "red"}.get(f.status, "dim")
+                table.add_row(f.type + ("" if f.scheduled else " (random)"), str(f.at_cycle),
+                              f"[{colour}]{f.status}[/{colour}]", ", ".join(f.flags), f.resolution or "")
+            self.console.print(table)
+        s = e.fault_summary
+        if s is not None and s.unexplained:
+            flags = ", ".join(f"{k} x{v}" for k, v in s.unexplained.items())
+            self.console.print(f"[dim]Flagged readings with nothing injected (false alarms on the twin): {escape(flags)}[/dim]")
         for warning in e.warnings:
             self.console.print(f"[bold red]WARNING:[/bold red] {escape(warning)}")
         self.console.print("\n[bold green]=== Artifacts ===[/bold green]")

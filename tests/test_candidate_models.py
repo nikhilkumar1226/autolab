@@ -226,7 +226,7 @@ def test_a_library_duplicate_is_skipped_as_equivalent(simulate):
     assert [f.key for f in result.fits] == [f.key for f in library_only.fits]
     assert result.delta_bic_runner_up == pytest.approx(library_only.delta_bic_runner_up)
     [skipped] = [s for s in result.skipped if s.key == "llm_1"]
-    assert "indistinguishable from Exponential decay" in skipped.reason
+    assert "indistinguishable from Decaying exponential" in skipped.reason
 
 
 def test_without_llm_models_the_filter_changes_nothing(simulate):

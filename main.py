@@ -3,13 +3,18 @@ Main entrypoint for the Autonomous Scientific Discovery System.
 Run autonomous scientific discovery loops on digital twin simulation or real physical hardware.
 """
 import argparse
+import json
 import logging
 import sys
+from pathlib import Path
 from typing import List, Optional
 
 from rich.markup import escape
 
-from config import config, SystemConfig, HardwareConfig, AgentConfig, LLMConfig, StoppingConfig, OutputConfig
+from config import (
+    config, DEFAULT_FAULTS, AgentConfig, FaultSpec, HardwareConfig, LLMConfig, NonIdealityConfig, OutputConfig,
+    SimulationConfig, StoppingConfig, SystemConfig,
+)
 from experiments.registry import list_experiments
 from agents.orchestrator import DiscoveryEngine
 from cli.console import ConsoleEventPrinter
@@ -96,6 +101,20 @@ def parse_args(argv: Optional[List[str]] = None):
         help="How to choose points after the initial design (default: gp uncertainty sampling)"
     )
     parser.add_argument(
+        "--nonideal",
+        action="store_true",
+        help="Digital twin: turn on the non-idealities (drift, saturation, quantisation, position error, backlash, "
+             "outliers, polariser extinction ratio)"
+    )
+    parser.add_argument(
+        "--faults",
+        type=str,
+        default="none",
+        help="Digital twin: injected faults. 'none' (default), 'default' (a light spike, a stuck actuator and a "
+             "2-cycle sensor dropout), a JSON list such as '[{\"type\": \"light_spike\", \"at_step\": 6}]', "
+             "or a path to a JSON file with such a list"
+    )
+    parser.add_argument(
         "--no-report",
         action="store_true",
         help="Skip the figure and Markdown/LaTeX report (the JSON run record is always written)"
@@ -119,6 +138,23 @@ def parse_args(argv: Optional[List[str]] = None):
     )
     return parser.parse_args(argv)
 
+def parse_faults(text: str) -> List[FaultSpec]:
+    """--faults: none, default, a JSON list, or a JSON file."""
+    text = text.strip()
+    if text.lower() in ("", "none"):
+        return []
+    if text.lower() == "default":
+        return [f.model_copy() for f in DEFAULT_FAULTS]
+    path = Path(text)
+    raw = path.read_text(encoding="utf-8") if not text.startswith("[") and path.is_file() else text
+    try:
+        items = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"--faults: not 'none', 'default', a JSON list or a JSON file ({exc.msg})")
+    if not isinstance(items, list):
+        raise SystemExit("--faults: expected a JSON list of faults")
+    return [FaultSpec.model_validate(item) for item in items]
+
 def build_config(args) -> SystemConfig:
     llm = LLMConfig()
     updates = {"provider": args.provider, "model": args.model}
@@ -132,6 +168,10 @@ def build_config(args) -> SystemConfig:
             simulate=not args.hardware,
             port=args.port,
             baud_rate=args.baud,
+        ),
+        simulation=SimulationConfig(
+            nonideal=NonIdealityConfig(enabled=args.nonideal),
+            faults=parse_faults(args.faults),
         ),
         agent=AgentConfig(sampler=args.sampler, blind=args.blind),
         llm=LLMConfig.model_validate(llm.model_dump()),
@@ -160,6 +200,12 @@ def rerun_command(args, sys_config: SystemConfig, seed: int) -> str:
         rerun += " --stability" if args.stability else " --no-stability"
     if args.sampler != "gp":
         rerun += f" --sampler {args.sampler}"
+    if args.nonideal:
+        rerun += " --nonideal"
+    if args.faults.strip().lower() not in ("", "none"):
+        faults = args.faults if args.faults.strip().lower() == "default" else json.dumps(
+            [f.model_dump(exclude_defaults=True) for f in sys_config.simulation.faults], separators=(",", ":"))
+        rerun += f" --faults '{faults}'" if faults.startswith("[") else f" --faults {faults}"
     return rerun
 
 def main(argv: Optional[List[str]] = None) -> int:

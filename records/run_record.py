@@ -9,7 +9,11 @@ agents' reasons, the LLM-proposed candidate models and what happened to them, an
 the Writer's discussion. The `experiment` snapshot includes the ground truth for
 benchmark scoring only; it is never passed to agents.
 
-Schema 1 records (Phase 1) still load: every newer field has a default.
+Since schema 3 it also holds each attempt's anomaly flags and how they were handled, the
+digital twin's settings (non-idealities, fault schedule) and, for the twin, the outcome of
+every injected fault: detected, recovered or missed (records/faults.py).
+
+Schema 1 and 2 records still load: every newer field has a default.
 """
 import logging
 from datetime import datetime
@@ -18,20 +22,23 @@ from typing import Dict, List, Literal, Optional, Tuple, Union
 
 from pydantic import BaseModel, Field
 
-from agents.models import AgentText, AnalystReview, CandidateEvaluation, Discussion, GPSuggestion, Hypothesis
+from agents.models import (
+    AgentText, AnalystReview, AnomalyHandling, CandidateEvaluation, Discussion, ExpectedBand, GPSuggestion, Hypothesis,
+)
 from analysis.model_library import AnalysisResult
 from analysis.stopping import PointPrediction, StopDecision
 from config import RUNS_DIR, SystemConfig
 from experiments.registry import AgentExperimentView, ExperimentSpec
 from hardware.base import DataSource
 from llm.types import LLMCallRecord, LLMUsage
+from records.faults import FaultOutcome, FaultSummary
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
-# planner = a position the Planner chose itself (Phase 2)
-StepSource = Literal["initial_design", "gp", "random", "planner"]
+# planner = a position the Planner chose itself (Phase 2); remeasure = the same position again after an anomaly (Phase 3)
+StepSource = Literal["initial_design", "gp", "random", "planner", "remeasure"]
 
 
 class ExperimentSnapshot(BaseModel):
@@ -41,6 +48,7 @@ class ExperimentSnapshot(BaseModel):
     # Scoring only. Never shown to agents.
     ground_truth_model: str
     true_params: Dict[str, float]
+    physical_params: Optional[Dict[str, float]] = None
 
     @classmethod
     def from_spec(cls, spec: ExperimentSpec, noise_std: Optional[float]) -> "ExperimentSnapshot":
@@ -50,6 +58,7 @@ class ExperimentSnapshot(BaseModel):
             noise_std=noise_std,
             ground_truth_model=spec.ground_truth_model,
             true_params=dict(spec.true_params),
+            physical_params=dict(spec.physical_params) if spec.physical_params is not None else None,
         )
 
 
@@ -57,10 +66,15 @@ class StepRecord(BaseModel):
     index: int = Field(description="1-based attempt number (rejected attempts count)")
     source: StepSource
     requested_position: Optional[float] = Field(description="None if the request was not a finite number")
-    status: Literal["measured", "rejected", "error"]
+    status: Literal["measured", "rejected", "error", "anomaly"]
     position: Optional[float] = None
-    value: Optional[float] = None
+    value: Optional[float] = Field(default=None, description="None if the reading was not a finite number")
     message: str = ""
+    flags: List[str] = Field(default_factory=list, description="Safety-guard anomaly flags (status anomaly)")
+    expected: List[ExpectedBand] = Field(default_factory=list, description="The bands the reading was checked against")
+    anomaly: Optional[AnomalyHandling] = Field(default=None, description="What was done after this flagged reading")
+    rig_cycle: Optional[int] = Field(default=None, description="The rig's cycle counter for this reading, if reported")
+    position_feedback: Optional[float] = None
     n_points: int = Field(description="Number of measurements after this step")
     gp: Optional[GPSuggestion] = None
     prediction: Optional[PointPrediction] = Field(
@@ -121,6 +135,10 @@ class RunRecord(BaseModel):
     stop_rationale: Optional[AgentText] = Field(default=None, description="The Planner's explanation; the decision is in `stop`")
     discussion: Optional[Discussion] = None
     warnings: List[str] = Field(default_factory=list, description="Problems that did not stop the run, e.g. a failed Writer call")
+    faults: List[FaultOutcome] = Field(
+        default_factory=list, description="Digital twin: every injected fault and random outlier, and what became of it"
+    )
+    fault_summary: Optional[FaultSummary] = None
 
     def measured_points(self) -> Tuple[List[float], List[float]]:
         steps = [s for s in self.steps if s.status == "measured"]

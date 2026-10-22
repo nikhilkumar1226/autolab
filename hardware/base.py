@@ -1,9 +1,10 @@
 """
 Abstract base class and data contracts for experimental hardware rigs.
 """
+import time
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, Field
 from datetime import datetime, timezone
 
@@ -20,6 +21,11 @@ class MeasurementResult(BaseModel):
     units_actuator: str = Field(default="degrees", description="Units for actuator position")
     units_sensor: str = Field(default="lux", description="Units for sensor reading")
     is_valid: bool = Field(default=True, description="Safety and validity status of measurement")
+    flags: List[str] = Field(
+        default_factory=list,
+        description="Why the safety guard considers the reading invalid (non_finite, timeout, saturated, "
+                    "position_mismatch, outlier, response_limit); empty when valid",
+    )
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional debug/environment info")
 
 class RigStatus(BaseModel):
@@ -85,3 +91,8 @@ class BaseHardwareRig(ABC):
         Retrieve current hardware status and telemetry.
         """
         pass
+
+    def wait(self, seconds: float) -> None:
+        """Pause before the next command (e.g. to let a sensor recover). The digital twin overrides this."""
+        if seconds > 0:
+            time.sleep(seconds)

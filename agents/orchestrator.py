@@ -13,12 +13,18 @@ Who decides what:
 - the safety guard accepts or rejects every position. A rejection is reported, recorded and
   given back to the Planner as an observation; it may re-propose up to max_reproposals times,
   then the GP proposes once. Nothing rejected is ever resent blindly;
+- the safety guard also flags suspicious readings (NaN, timeout, saturation, position mismatch,
+  far outside the GP band, over the response limit). A flagged reading never enters the data.
+  The Executor re-measures once; if the reading is flagged again, the Analyst (LLM, or a
+  heuristic) decides to re-measure, pause or discard the position, at most max_decisions times;
 - the Analyst fits the library blind, and the Analyst LLM may add one candidate model per review;
 - the numerical stopping rule decides when to stop; the Planner only explains the decision;
 - the Writer drafts the discussion from the record's numbers.
 If every LLM model fails during the experiment, the run stops with an error (never a silent
 switch to the mock). If it happens after the stop decision, the result is kept and the
 missing text is flagged in the record, the report and the console.
+On the digital twin, the injected faults are scored against the twin's fault log only after
+the run has stopped (records/faults.py).
 """
 import math
 import uuid
@@ -32,7 +38,7 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from config import SystemConfig, config as default_config
+from config import SystemConfig, config as default_config, describe_twin
 from experiments.registry import AgentExperimentView, ExperimentSpec, get_experiment
 from hardware.base import BaseHardwareRig
 from hardware.simulator import PhysicsSimulationRig
@@ -40,9 +46,10 @@ from hardware.serial_driver import SerialHardwareRig
 from hardware.safety_guard import HardwareSafetyGuard, SafetyLimits
 from optimization.bayesian_opt import ActiveLearningEngine
 from optimization.baselines import RandomSampler
-from agents.models import AgentText, Discussion, GPSuggestion
+from agents.models import AgentText, AnomalyHandling, Discussion, GPSuggestion
 from agents.events import (
     AnalysisCompleted,
+    AnomalyDetected,
     EventCallback,
     EventEmitter,
     GPUpdated,
@@ -66,6 +73,7 @@ from analysis.model_library import AnalysisResult
 from analysis.stopping import PointPrediction, StopDecision, StopReason, evaluate_stopping, predict_new_point
 from llm.client import LLMClient, LLMUnavailableError
 from llm.types import LLMCallRecord, LLMUsage
+from records.faults import score_faults
 from records.run_record import (
     ExperimentSnapshot,
     RunRecord,
@@ -100,6 +108,7 @@ class _Run:
     """Per-run state, so one engine can run several times without leaking history."""
     record: RunRecord
     events: EventEmitter
+    rig: BaseHardwareRig
     guard: HardwareSafetyGuard
     tools: LabTools
     executor: HardwareExecutorAgent
@@ -114,6 +123,7 @@ class _Run:
     prediction: Optional[PointPrediction] = None
     last_decision: Optional[StopDecision] = None
     rejections: List[Dict[str, Any]] = field(default_factory=list)
+    anomalies: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
     def has_llm(self) -> bool:
@@ -167,11 +177,9 @@ class DiscoveryEngine:
         rig = self._build_rig(np.random.default_rng(sim_seq))
         # Limits come from the spec only, and are fixed before any agent is asked anything.
         lo, hi = self.spec.safe_bounds
-        guard = HardwareSafetyGuard(
-            rig, SafetyLimits(min_position=lo, max_position=hi, max_step_delta=self.spec.max_step_delta)
-        )
+        guard = HardwareSafetyGuard(rig, SafetyLimits.from_spec(self.spec))
         optimizer = ActiveLearningEngine(min_bound=lo, max_bound=hi, random_state=int(gp_seq.generate_state(1)[0]))
-        tools = LabTools(guard, optimizer)
+        tools = LabTools(guard, optimizer, cfg.agent.anomaly)
 
         started = datetime.now(timezone.utc)
         run_id = f"{started:%Y%m%dT%H%M%SZ}_{self.spec.name}_s{seed}_{uuid.uuid4().hex[:4]}"
@@ -201,6 +209,7 @@ class DiscoveryEngine:
         run = _Run(
             record=record,
             events=events,
+            rig=rig,
             guard=guard,
             tools=tools,
             executor=HardwareExecutorAgent(tools),
@@ -228,6 +237,7 @@ class DiscoveryEngine:
                 logger.exception("Run %s failed", run_id)
             record.error = f"{type(exc).__name__}: {exc}"
             record.stop = self._stop_check(run, len(tools.history_x), override=StopReason.ERROR)
+            self._score_faults(run)
             record.llm_usage = LLMUsage.from_calls(record.llm_calls)
             record.finished_at = datetime.now(timezone.utc)
             record.timings.total_s = time.perf_counter() - t0
@@ -248,6 +258,7 @@ class DiscoveryEngine:
             data_source=record.data_source,
             budget=cfg.stopping.max_measurements,
             sampler=cfg.agent.sampler,
+            twin=describe_twin(cfg),
             provider=run.client.provider,
             llm=run.client.describe(),
             blind=cfg.agent.blind,
@@ -305,8 +316,10 @@ class DiscoveryEngine:
             step, decision = self._attempt(run, proposal, attempt)
             if step.status == "measured":
                 return True, decision
+            if step.status == "anomaly":
+                return self._recover(run, step)
             if step.status != "rejected":
-                return False, None  # actuator or sensor error: no re-proposal (fault handling is Phase 3)
+                return False, None  # actuator or driver error: no re-proposal
 
             observation = {"rejected_position": step.requested_position, "guard_message": step.message, "attempt": attempt}
             run.rejections.append(observation)
@@ -335,6 +348,75 @@ class DiscoveryEngine:
                     suggestion.position, "gp", suggestion,
                     rationale=f"GP fallback after {max_reproposals} rejected re-proposal(s)",
                 )
+
+    # ------------------------------------------------------------------
+    # Flagged readings: re-measure, then the Analyst decides
+    # ------------------------------------------------------------------
+    def _recover(self, run: _Run, step: StepRecord) -> Tuple[bool, Optional[StopDecision]]:
+        """
+        Handle a flagged reading at one position. The Executor re-measures once; every later flag
+        goes to the Analyst (remeasure / pause / discard), at most max_decisions times, then the
+        position is discarded. A reading over the response limit is discarded at once (the guard
+        has already backed off and refuses that position).
+        """
+        cfg = self.config.agent.anomaly
+        position = step.requested_position
+        readings: List[Optional[float]] = []
+        decisions = 0
+        while True:
+            readings.append(step.value)
+            if "response_limit" in step.flags:
+                handling = AnomalyHandling(
+                    action="discard", decided_by="safety_guard",
+                    reason="the reading exceeded the hard response limit; the guard backed the actuator off and "
+                           "refuses this position from now on",
+                )
+            elif len(readings) == 1:
+                handling = AnomalyHandling(action="remeasure", decided_by="executor",
+                                           reason="automatic re-measurement after the first flagged reading")
+            elif decisions >= cfg.max_decisions:
+                handling = AnomalyHandling(
+                    action="discard", decided_by="executor",
+                    reason=f"still flagged after {decisions} Analyst decision(s); the position is given up",
+                )
+            else:
+                decisions += 1
+                handling = run.analyst.decide_anomaly(self._anomaly_payload(run, step, readings, decisions), step=step.index)
+                if handling.llm_call_id is not None:
+                    step.llm_call_ids.append(handling.llm_call_id)
+            step.anomaly = handling
+            run.anomalies.append({"position": position, "flags": step.flags, "action": handling.action})
+            run.events.emit(
+                AnomalyDetected, step=step.index, source=step.source, position=position, value=step.value,
+                flags=step.flags, expected=step.expected, handling=handling,
+            )
+            if handling.action == "discard":
+                run.tools.discard(position)
+                return False, None
+            if handling.action == "pause":
+                run.guard.pause(cfg.pause_s)
+            confirm = step.value if step.flags == ["outlier"] else None
+            proposal = _Proposal(position, "remeasure",
+                                 rationale=f"re-measurement after {', '.join(step.flags)} ({handling.decided_by}: {handling.action})")
+            step, decision = self._attempt(run, proposal, step.attempt_in_slot + 1, confirm=confirm)
+            if step.status == "measured":
+                return True, decision
+            if step.status != "anomaly":
+                return False, None
+
+    def _anomaly_payload(self, run: _Run, step: StepRecord, readings: List[Optional[float]], decisions: int) -> Dict[str, Any]:
+        view = run.view
+        return {
+            "variables": {"x": {"name": view.independent.name, "units": view.independent.units},
+                          "y": {"name": view.dependent.name, "units": view.dependent.units}},
+            "position": step.requested_position,
+            "flags": step.flags,
+            "readings_here": readings,
+            "expected": [b.model_dump() for b in step.expected],
+            "position_feedback": step.position_feedback,
+            "n_measurements": len(run.tools.history_x),
+            "decisions_left": self.config.agent.anomaly.max_decisions - decisions,
+        }
 
     def _first_proposal(self, run: _Run, queue: Deque[float], index: int) -> _Proposal:
         if queue:
@@ -381,6 +463,7 @@ class DiscoveryEngine:
             disagreement=disagreement,
             budget_left=self.config.stopping.max_measurements - len(tools.history_x),
             recent_rejections=[r for r in run.rejections if r is not observation][-3:],
+            recent_anomalies=run.anomalies[-3:],
             observation=observation,
         )
 
@@ -392,7 +475,8 @@ class DiscoveryEngine:
         run.events.emit(GPUpdated, step=index, suggestion=suggestion, curve=curve)
         return suggestion
 
-    def _attempt(self, run: _Run, proposal: _Proposal, attempt: int) -> Tuple[StepRecord, Optional[StopDecision]]:
+    def _attempt(self, run: _Run, proposal: _Proposal, attempt: int,
+                 confirm: Optional[float] = None) -> Tuple[StepRecord, Optional[StopDecision]]:
         """Send one position through the guard and record it; analyse after a measurement."""
         cfg, record, tools = self.config, run.record, run.tools
         index = len(record.steps) + 1
@@ -400,7 +484,7 @@ class DiscoveryEngine:
         t_step = time.perf_counter()
 
         t_hw = time.perf_counter()
-        outcome = run.executor.execute_step(position, rationale=proposal.source)
+        outcome = run.executor.execute_step(position, rationale=proposal.source, confirm=confirm)
         record.timings.hardware_s += time.perf_counter() - t_hw
 
         step = StepRecord(
@@ -416,6 +500,10 @@ class DiscoveryEngine:
             rationale=proposal.rationale,
             attempt_in_slot=attempt,
             llm_call_ids=list(proposal.llm_call_ids),
+            flags=outcome.flags,
+            expected=outcome.expected,
+            rig_cycle=outcome.cycle,
+            position_feedback=outcome.position_feedback,
         )
         decision: Optional[StopDecision] = None
         if outcome.status == "measured":
@@ -443,6 +531,9 @@ class DiscoveryEngine:
                 run.analysis = analysis
                 run.analyses.append(analysis)
                 step.analysis = analysis
+                if analysis.best is not None:
+                    floor = cfg.stopping.noise_floor_rel * float(np.ptp(tools.history_y))
+                    tools.reference_fit = (analysis.best, max(analysis.best.residual_std, floor))
                 decision = run.last_decision = self._stop_check(run, step.n_points)
                 run.events.emit(AnalysisCompleted, step=index, analysis=analysis, stop_check=decision, review=review)
 
@@ -460,8 +551,21 @@ class DiscoveryEngine:
     # ------------------------------------------------------------------
     # After the stop decision
     # ------------------------------------------------------------------
+    def _score_faults(self, run: _Run) -> None:
+        """Digital twin only: compare the twin's fault log (ground truth) with what was flagged."""
+        rig = run.rig
+        if not isinstance(rig, PhysicsSimulationRig):
+            return
+        stop = run.record.stop
+        run_ok = stop is not None and stop.reason in (StopReason.CONVERGED, StopReason.BUDGET_EXHAUSTED)
+        run.record.faults, run.record.fault_summary = score_faults(
+            run.record.steps, rig.fault_log, self.config.simulation.faults,
+            last_cycle=int(rig.get_status().telemetry.get("cycle", 0)), run_ok=run_ok,
+        )
+
     def _finish(self, run: _Run, t0: float) -> None:
         record, tools = run.record, run.tools
+        self._score_faults(run)
         best = run.analysis.best if run.analysis is not None else None
         record.result = RunResult(
             n_measurements=len(tools.history_x),
@@ -489,7 +593,8 @@ class DiscoveryEngine:
         record.finished_at = datetime.now(timezone.utc)
         record.timings.total_s = time.perf_counter() - t0
         self._save(run)
-        run.events.emit(ReportReady, artifacts=record.artifacts, llm_usage=record.llm_usage, warnings=record.warnings)
+        run.events.emit(ReportReady, artifacts=record.artifacts, llm_usage=record.llm_usage, warnings=record.warnings,
+                        faults=record.faults, fault_summary=record.fault_summary)
 
     def _late_llm(self, run: _Run, what: str, ask, unavailable):
         """An LLM step after the stop decision: if every model fails, keep the result and flag the gap."""

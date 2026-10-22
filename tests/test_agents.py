@@ -16,11 +16,13 @@ from pydantic import ValidationError
 
 import agents.orchestrator as orchestrator
 import main
-from agents.analyst import mock_review
+from agents.analyst import heuristic_anomaly, mock_review
 from agents.lead_scientist import LeadScientistAgent, clip_range, mock_plan, mock_stop, mock_strategy
 from agents.models import AnalystReport, PlannerOutput, StrategyDecision
 from agents.orchestrator import DiscoveryEngine
-from agents.prompts import ANALYST_SYSTEM, PLANNER_SYSTEM, PROMPT_VERSION, STOP_SYSTEM, STRATEGY_SYSTEM, WRITER_SYSTEM
+from agents.prompts import (
+    ANALYST_SYSTEM, ANOMALY_SYSTEM, PLANNER_SYSTEM, PROMPT_VERSION, STOP_SYSTEM, STRATEGY_SYSTEM, WRITER_SYSTEM,
+)
 from agents.writer import find_unverified_numbers, mock_writer
 from analysis.stopping import StopReason
 from config import AgentConfig, LLMConfig, OutputConfig
@@ -31,7 +33,7 @@ from llm.client import LLMClient, LLMUnavailableError, _litellm
 from records.run_record import RunRecord, list_run_records, load_run_record
 
 MOCKS = {PLANNER_SYSTEM: mock_plan, STRATEGY_SYSTEM: mock_strategy, ANALYST_SYSTEM: mock_review,
-         STOP_SYSTEM: mock_stop, WRITER_SYSTEM: mock_writer}
+         STOP_SYSTEM: mock_stop, WRITER_SYSTEM: mock_writer, ANOMALY_SYSTEM: heuristic_anomaly}
 
 
 class AgentScript:
@@ -49,7 +51,8 @@ class AgentScript:
         system = kwargs["messages"][0]["content"]
         payload = json.loads(kwargs["messages"][1]["content"])
         self.requests.append((system, payload))
-        return self.overrides.get(system, MOCKS[system])(payload)
+        handler = self.overrides[system] if system in self.overrides else MOCKS[system]
+        return handler(payload)
 
     def payloads(self, system: str):
         return [p for s, p in self.requests if s == system]
@@ -268,6 +271,9 @@ PEAK = ExperimentSpec(
     safe_bounds=(0.0, 100.0),
     max_step_delta=100.0,
     noise=NoiseSettings(std=5.0),
+    sensor_range=(0.0, 2000.0),
+    sensor_resolution=0.1,
+    position_tolerance=0.5,
     ground_truth=_gaussian,
     ground_truth_model="not_in_library",
     true_params={"A": 800.0, "x0": 40.0, "w": 12.0, "C": 20.0},
@@ -334,7 +340,8 @@ def test_provider_none_takes_the_same_measurements_as_mock(make_config, tmp_path
     mock = DiscoveryEngine(make_config(experiment=name, seed=2)).run()
 
     assert none.llm_calls == [] and none.hypothesis.source == "heuristic" and none.stop_rationale is None
-    assert all(s.review is None and s.rationale == "" for s in none.steps)
+    # No agent text; the only reasons are the engine's own re-measurement notes after a flagged reading.
+    assert all(s.review is None and (s.rationale == "" or s.source == "remeasure") for s in none.steps)
     assert none.measured_points() == mock.measured_points()
     assert none.stop.model_dump() == mock.stop.model_dump()
     assert none.result.final_analysis.best.key == get_experiment(name).ground_truth_model

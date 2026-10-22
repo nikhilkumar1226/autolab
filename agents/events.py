@@ -8,6 +8,7 @@ never fed to agents.
 
 Phase 2 adds `strategy` (the Planner's choice before a measurement, with its reason)
 and `llm_call` (one per LLM call: agent, purpose, model that answered, tokens, cost).
+Phase 3 adds `anomaly` (a reading the safety guard flagged, and what happens next).
 The full prompts and answers are in the run record, not in the events.
 """
 import logging
@@ -16,11 +17,12 @@ from typing import Annotated, Any, Callable, Dict, List, Literal, Optional, Unio
 
 from pydantic import BaseModel, Field
 
-from agents.models import AgentText, AnalystReview, GPCurve, GPSuggestion, Hypothesis
+from agents.models import AgentText, AnalystReview, AnomalyHandling, ExpectedBand, GPCurve, GPSuggestion, Hypothesis
 from analysis.model_library import AnalysisResult
 from analysis.stopping import StopDecision
 from hardware.base import DataSource
 from llm.types import LLMUsage
+from records.faults import FaultOutcome, FaultSummary
 from records.run_record import Artifacts, RunResult, StepSource
 
 logger = logging.getLogger(__name__)
@@ -40,6 +42,7 @@ class RunStarted(_EventBase):
     data_source: DataSource
     budget: int
     sampler: str
+    twin: str = Field(default="", description="Digital-twin settings (non-idealities, faults) for the operator display")
     provider: str = "none"
     llm: str = Field(default="", description="Provider and model chain, for display")
     blind: bool = False
@@ -72,6 +75,18 @@ class SafetyRejected(_EventBase):
     fed_back_to: Optional[Literal["planner", "gp"]] = Field(
         default=None, description="Who proposes next: the Planner (with this message as an observation) or the GP fallback"
     )
+
+
+class AnomalyDetected(_EventBase):
+    """The safety guard flagged a reading; `handling` says what happens next and who decided."""
+    type: Literal["anomaly"] = "anomaly"
+    step: int
+    source: StepSource
+    position: float
+    value: Optional[float] = Field(description="None if the reading was not a number")
+    flags: List[str]
+    expected: List[ExpectedBand] = Field(default_factory=list)
+    handling: AnomalyHandling
 
 
 class StrategyDecided(_EventBase):
@@ -129,10 +144,12 @@ class ReportReady(_EventBase):
     artifacts: Artifacts
     llm_usage: Optional[LLMUsage] = None
     warnings: List[str] = Field(default_factory=list)
+    faults: List[FaultOutcome] = Field(default_factory=list, description="Digital twin: what became of each injected fault")
+    fault_summary: Optional[FaultSummary] = None
 
 
 EngineEvent = Annotated[
-    Union[RunStarted, HypothesisProposed, MeasurementTaken, SafetyRejected, StrategyDecided,
+    Union[RunStarted, HypothesisProposed, MeasurementTaken, SafetyRejected, AnomalyDetected, StrategyDecided,
           LLMCalled, AnalysisCompleted, GPUpdated, RunStopped, ReportReady],
     Field(discriminator="type"),
 ]

@@ -90,13 +90,47 @@ class ExperimentStep(BaseModel):
     rationale: str
     acquisition_strategy: str = "uncertainty"
 
+class ExpectedBand(BaseModel):
+    """A predictive band at a position, used to flag outliers."""
+    source: Literal["gp", "model"] = Field(
+        description="gp = the GP surrogate's predictive band; model = the current best fit, sigma = its residual std (floored)"
+    )
+    mean: float
+    sigma: float
+    threshold: float = Field(default=4.0, description="Flag beyond this many sigma (normal for gp, Student-t for model)")
+
+
 class ExecutionOutcome(BaseModel):
     """Result of one measurement attempt, as seen by the agents."""
-    status: Literal["measured", "rejected", "error"]
+    status: Literal["measured", "rejected", "error", "anomaly"]
     requested_position: float
     position: Optional[float] = None
-    value: Optional[float] = None
+    value: Optional[float] = Field(default=None, description="None when the reading is not a finite number")
     message: str = ""
+    flags: List[str] = Field(default_factory=list, description="Safety-guard anomaly flags (status anomaly)")
+    expected: List[ExpectedBand] = Field(default_factory=list)
+    cycle: Optional[int] = Field(default=None, description="Rig cycle counter of the reading, if the rig reports one")
+    position_feedback: Optional[float] = None
+
+
+class AnomalyHandling(BaseModel):
+    """What was done after a flagged reading, and who decided."""
+    action: Literal["remeasure", "pause", "discard"]
+    decided_by: Literal["executor", "safety_guard", "analyst"] = Field(
+        description="executor = the automatic first re-measurement or the decision limit; analyst = the Analyst's choice"
+    )
+    reason: str
+    source: Optional[TextSource] = Field(default=None, description="For the analyst: llm, mock or heuristic")
+    model: Optional[str] = None
+    llm_call_id: Optional[int] = None
+
+
+class AnomalyDecision(BaseModel):
+    """The Analyst's choice after a reading was flagged twice at the same position."""
+    action: Literal["remeasure", "pause", "discard"] = Field(
+        description="remeasure = read again now; pause = wait, then read again; discard = give up this position"
+    )
+    reason: str = Field(min_length=1, max_length=600)
 
 class GPSuggestion(BaseModel):
     position: float

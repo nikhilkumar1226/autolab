@@ -9,6 +9,7 @@ Rules I followed: provider `mock` (or `none`) only, no real LLM or paid API was 
 | Phase | Branch | Tag | Tests | Done-when |
 |---|---|---|---|---|
 | 2 (fix) | `phase-2-llm-agents` | `phase-2.1` | 230 passed | 2 of 4 pass; the other 2 need your keys |
+| 3 | `phase-3-digital-twin` | `phase-3` | 311 passed | 2 of 2 pass |
 
 ## Decisions I made
 
@@ -20,6 +21,16 @@ Rules I followed: provider `mock` (or `none`) only, no real LLM or paid API was 
   - sympy used to simplify the expression to detect "does not depend on x", "parameter has no effect" and `1/0`. Without sympy these checks are numerical, at fixed probe points. Parameter kinds (scale / location / offset) come from numerical derivatives. See CHANGELOG "Phase 2 fix" for the one known limitation.
 - **sympy removed.** No code uses it now, so I removed it from `requirements.txt` and uninstalled it from `.venv` (`pip install sympy` puts it back if you ever need it).
 
+### Phase 3 (details and numbers in CHANGELOG "Phase 3")
+- **8 experiments, not 6.** The prompt lists 3 old + 5 new laws, so the "all 6 experiments" Done-when item was checked on all 8.
+- **Stefan–Boltzmann temperature is in kK** (0.8–2.8 kK). In kelvin the power-law amplitude's relative SE was 22%, so the run could never converge.
+- **No separate "saturating exponential" model.** It is the same family as the decaying exponential with a negative amplitude, and two identical models would tie on BIC forever. "Exponential decay" was renamed "Decaying exponential"; the key `exp_decay` is unchanged. A **growing exponential** was added for the diode.
+- **New parsimony rule** (`analysis/parsimony.py`). Without it a linear law (Hooke) can never converge, because several 3-parameter models contain a line. It changes nothing for the Phase 1 experiments (checked: 0 of 60 sweep runs differ).
+- **Outlier detection uses the best fit's prediction band, not the GP band the ROADMAP names.** The GP band was badly calibrated: 47 false alarms in 80 clean runs and 34 of 80 spikes missed, against 1 false alarm and 8 missed for the fit band. The GP band is still available as an option. I set the default before running that comparison.
+- **Default fault schedule:** spike at cycle 6, stuck actuator at 8, dropout at 10–11. The ROADMAP example (stuck at 7, dropout at 9) cannot work as intended: cycle 7 is always the automatic re-measurement after the spike. You can still pass the ROADMAP's version as JSON with `--faults`.
+- **Non-idealities are sized relative to each experiment's noise and position tolerance.** Drift was first sized relative to the response span. That was about 5 noise-σ per cycle for the precise diode and wrecked 19/20 runs, so I changed it to 0.3 noise-σ per cycle before the final sweep.
+- **Faults count rig cycles:** one cycle is one reading or one pause, re-measurements included.
+
 ## What you must do yourself
 
 1. **`.env` layout.** Your `.env` still has the old Groq/Ollama layout. Copy the layout from `.env.example` (Claude first, then the two Gemini models) and add `ANTHROPIC_API_KEY` and `GEMINI_API_KEY`. I did not touch `.env`.
@@ -29,4 +40,5 @@ Rules I followed: provider `mock` (or `none`) only, no real LLM or paid API was 
 
 ## Open questions
 
-- None yet.
+- **Random outliers are rarely caught** (8 of 68 in the sweep), because most runs stop at n = 8, when a fit has too few degrees of freedom to call anything an outlier at p = 0.001. Option: calibrate each instrument's noise once (repeated readings at one position) and use it for detection. Should we add that calibration step?
+- **Hooke with faults converged on cos² in 4/20 runs** (cos² over 0–20 "degrees" is almost a straight line). Raising `min_points` for all experiments, or turning on predictive stability, would probably fix it but costs measurements. Your call after the Phase 5 benchmark.

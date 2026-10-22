@@ -415,6 +415,25 @@ def predict_fit(fit: ModelFit, x: Sequence[float]) -> Optional[np.ndarray]:
         return np.asarray(model.predict(x, fit.params), dtype=float)
 
 
+def prediction_se(fit: ModelFit, x: float) -> Optional[float]:
+    """Standard error of the fitted curve at x from the parameter covariance (delta method)."""
+    model = model_for_fit(fit)
+    if model is None or fit.covariance is None:
+        return None
+    names = list(model.param_names)
+    theta = np.array([fit.params[p] for p in names], dtype=float)
+    grad = np.empty(len(names))
+    with np.errstate(all="ignore"):
+        for i in range(len(names)):
+            h = 1e-6 * max(1.0, abs(theta[i]))
+            up, down = theta.copy(), theta.copy()
+            up[i] += h
+            down[i] -= h
+            grad[i] = (model.func(np.array([x]), *up)[0] - model.func(np.array([x]), *down)[0]) / (2 * h)
+    variance = float(grad @ np.asarray(fit.covariance, dtype=float) @ grad)
+    return math.sqrt(variance) if math.isfinite(variance) and variance >= 0 else None
+
+
 # ---------------------------------------------------------------------------
 # Equivalence filter
 # ---------------------------------------------------------------------------
