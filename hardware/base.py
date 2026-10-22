@@ -96,3 +96,7 @@ class BaseHardwareRig(ABC):
         """Pause before the next command (e.g. to let a sensor recover). The digital twin overrides this."""
         if seconds > 0:
             time.sleep(seconds)
+
+    def clock(self) -> float:
+        """Seconds on the rig's clock, for the safety guard's rate limit and watchdog. The twin keeps simulated time."""
+        return time.monotonic()

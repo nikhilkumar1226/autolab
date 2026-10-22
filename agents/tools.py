@@ -10,7 +10,7 @@ from scipy import stats
 from analysis.candidate_models import predict_fit, prediction_se
 from analysis.model_library import ModelFit
 from config import AnomalyConfig
-from hardware.safety_guard import HardwareSafetyGuard, SafetyViolationError
+from hardware.safety_guard import HardwareSafetyGuard, SafetyViolationError, _finite_real
 from optimization.bayesian_opt import ActiveLearningEngine, AcquisitionStrategy
 from agents.models import ExecutionOutcome, ExpectedBand, GPCurve, GPSuggestion
 
@@ -74,23 +74,25 @@ class LabTools:
         reading is flagged only as an outlier too, and agrees with it within the narrowest band's
         sigma, both are genuine (the expectation was wrong, not the sensor): this reading is accepted.
         """
+        requested = _finite_real(position)  # what is recorded; the guard itself checks `position` as given
         try:
             move = self.safety_guard.safe_move(position)
             if not move["success"]:
-                return ExecutionOutcome(status="error", requested_position=position, message="actuator reported a failed move")
+                return ExecutionOutcome(status="error", requested_position=requested, message="actuator reported a failed move")
             bands = self.expected_bands(position)
             measurement = self.safety_guard.safe_read(expected=[(b.mean, b.sigma, b.threshold) for b in bands])
         except SafetyViolationError as e:
-            self.rejected_positions.append(position)
-            return ExecutionOutcome(status="rejected", requested_position=position, message=str(e))
+            if requested is not None:
+                self.rejected_positions.append(requested)
+            return ExecutionOutcome(status="rejected", requested_position=requested, message=str(e))
         except Exception as e:
-            return ExecutionOutcome(status="error", requested_position=position, message=f"{type(e).__name__}: {e}")
+            return ExecutionOutcome(status="error", requested_position=requested, message=f"{type(e).__name__}: {e}")
 
         value = measurement.sensor_value if math.isfinite(measurement.sensor_value) else None
         cycle = measurement.metadata.get("cycle")
         feedback = measurement.metadata.get("position_feedback")
         common = dict(
-            requested_position=position, position=measurement.actuator_position, value=value, expected=bands,
+            requested_position=requested, position=measurement.actuator_position, value=value, expected=bands,
             cycle=cycle if isinstance(cycle, int) else None,
             position_feedback=float(feedback) if isinstance(feedback, (int, float)) else None,
         )
@@ -129,9 +131,15 @@ class LabTools:
             return GPSuggestion(position=self._nearest_allowed(mid), strategy="initial_midpoint", max_sigma=1.0, mean_sigma=1.0)
 
         strat = AcquisitionStrategy(strategy) if strategy in [s.value for s in AcquisitionStrategy] else AcquisitionStrategy.UNCERTAINTY
+        limits = self.safety_guard.limits
+        reachable = None
+        if limits.max_step_delta < limits.max_position - limits.min_position:
+            here = self.safety_guard.get_status().current_position
+            reachable = (here - limits.max_step_delta, here + limits.max_step_delta)
         suggestion = self.optimizer.suggest_next_sample(
             np.array(self.history_x), np.array(self.history_y), strategy=strat,
             exclude=[*self.rejected_positions, *self.discarded_positions], upper=self.safety_guard.ceiling,
+            reachable=reachable,
         )
         return GPSuggestion(
             position=suggestion["suggested_position"],

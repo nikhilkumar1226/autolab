@@ -9,6 +9,7 @@ agents' reasons, the LLM-proposed candidate models and what happened to them, an
 the Writer's discussion. The `experiment` snapshot includes the ground truth for
 benchmark scoring only; it is never passed to agents.
 
+Since schema 4 it also holds the safety guard's audit log (hash-chained).
 Since schema 3 it also holds each attempt's anomaly flags and how they were handled, the
 digital twin's settings (non-idealities, fault schedule) and, for the twin, the outcome of
 every injected fault: detected, recovered or missed (records/faults.py).
@@ -30,12 +31,13 @@ from analysis.stopping import PointPrediction, StopDecision
 from config import RUNS_DIR, SystemConfig
 from experiments.registry import AgentExperimentView, ExperimentSpec
 from hardware.base import DataSource
+from hardware.audit import AuditEntry, verify_chain
 from llm.types import LLMCallRecord, LLMUsage
 from records.faults import FaultOutcome, FaultSummary
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # planner = a position the Planner chose itself (Phase 2); remeasure = the same position again after an anomaly (Phase 3)
 StepSource = Literal["initial_design", "gp", "random", "planner", "remeasure"]
@@ -139,6 +141,13 @@ class RunRecord(BaseModel):
         default_factory=list, description="Digital twin: every injected fault and random outlier, and what became of it"
     )
     fault_summary: Optional[FaultSummary] = None
+    audit_log: List[AuditEntry] = Field(
+        default_factory=list, description="The safety guard's append-only, hash-chained log of every request and decision"
+    )
+
+    def audit_intact(self) -> bool:
+        """True if the audit log's hash chain is unbroken (no entry removed, reordered or edited)."""
+        return verify_chain(self.audit_log)[0]
 
     def measured_points(self) -> Tuple[List[float], List[float]]:
         steps = [s for s in self.steps if s.status == "measured"]

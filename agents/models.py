@@ -10,12 +10,23 @@ Two kinds of schema live here:
 
 Model-fit and analysis schemas live in analysis/model_library.py, next to the code that produces them.
 """
-from typing import List, Literal, Optional
-from pydantic import BaseModel, Field, FiniteFloat, model_validator
+from typing import Annotated, Any, List, Literal, Optional
+from pydantic import BaseModel, BeforeValidator, Field, FiniteFloat, model_validator
 
 from analysis.candidate_models import CandidateModelSpec
 
 TextSource = Literal["llm", "mock", "heuristic", "unavailable"]
+
+
+def _json_number(value: Any) -> Any:
+    """A position from a model must be a JSON number: "90", "90 deg" or true are refused, not coerced."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("must be a JSON number (not a string, boolean, list or object)")
+    return value
+
+
+# A finite JSON number. Used for every position or range an LLM proposes.
+Number = Annotated[FiniteFloat, BeforeValidator(_json_number)]
 
 # ---------------------------------------------------------------------------
 # LLM outputs
@@ -27,18 +38,18 @@ class HypothesisDraft(BaseModel):
         min_length=1, max_length=5, description="Plausible relationships between the variables, in words"
     )
     independent_variable: str = Field(min_length=1, max_length=120)
-    proposed_range: List[FiniteFloat] = Field(
+    proposed_range: List[Number] = Field(
         min_length=2, max_length=2, description="[min, max] to explore; must lie inside safe_bounds"
     )
 
 class PlannerOutput(BaseModel):
     hypothesis: HypothesisDraft
-    initial_design: List[FiniteFloat] = Field(min_length=3, max_length=5, description="3-5 positions to measure first")
+    initial_design: List[Number] = Field(min_length=3, max_length=5, description="3-5 positions to measure first")
     rationale: str = Field(min_length=1, max_length=800)
 
 class StrategyDecision(BaseModel):
     choice: Literal["gp", "self"] = Field(description="gp = take the GP suggestion; self = measure at `position`")
-    position: Optional[FiniteFloat] = Field(default=None, description="Required when choice is 'self'")
+    position: Optional[Number] = Field(default=None, description="Required when choice is 'self'")
     reason: str = Field(min_length=1, max_length=600)
 
     @model_validator(mode="after")
@@ -103,7 +114,7 @@ class ExpectedBand(BaseModel):
 class ExecutionOutcome(BaseModel):
     """Result of one measurement attempt, as seen by the agents."""
     status: Literal["measured", "rejected", "error", "anomaly"]
-    requested_position: float
+    requested_position: Optional[float] = Field(description="None if the request was not a finite real number")
     position: Optional[float] = None
     value: Optional[float] = Field(default=None, description="None when the reading is not a finite number")
     message: str = ""

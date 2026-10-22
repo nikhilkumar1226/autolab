@@ -444,3 +444,96 @@ A perfect simulator makes any method look perfect. Drift, saturation, position e
 - **A pause on the twin is one cycle of simulated time**, not a real wait. On hardware it is a real `sleep`.
 - **Anomaly decisions have only been made by the heuristic and the mock**, never by a real LLM. The mock uses the heuristic, so mock and `none` runs agree.
 - **The ROADMAP's GP band is not the default**, for the reasons in the table above. It remains available as `outlier_bands = "gp"` or `"both"`.
+
+## Phase 4: Safety hardening and red-team test (2026-10-22)
+
+### What changed
+- **The safety guard** (`hardware/safety_guard.py`) checks every command in this order:
+  1. the E-stop is not latched;
+  2. the watchdog has not expired;
+  3. the target is a finite real number;
+  4. it is inside the bounds and below any response-limit ceiling;
+  5. the step is at most the spec's limit;
+  6. the rate limit;
+  7. the oscillation interlock.
+
+  New in Phase 4:
+  - **Careful type check.** A value is converted to a finite float once (`_finite_real`), and only that float is used. Before, `math.isfinite(10**400)` raised `OverflowError` inside the check. `Decimal`, `complex`, `bytes`, containers, `bool` and `None` are refused.
+  - **Rate limit:** at most 5 moves in any 1 s of rig time (`SafetyConfig.max_moves_per_s`).
+  - **Oscillation interlock:** at most 3 moves in a row without a sensor reading. The rate limit alone cannot stop a full-travel oscillation, because each 0–180° swing takes 0.55 s of travel, so it stays under 5 moves/s. Every real measurement is one move and one reading.
+  - **Watchdog:** the E-stop latches if no valid reading arrives within 120 s of rig time. The default is generous because on hardware the rig clock is wall time and includes LLM latency between readings.
+  - **Latched E-stop:** `emergency_stop(reason)` latches. Only `reset_estop(operator=<name>)` clears it; an empty name is refused, and every attempt is logged. `DiscoveryEngine.emergency_stop()` latches the running run's guard, which is the hook for the Phase 7 dashboard. When latched, the engine aborts the run at once (`safety_abort`, "E-stop latched (…)") instead of asking the Planner again.
+  - **Rig clock.** Every rig has a `clock()`. The digital twin keeps simulated time: a move takes 0.05 s plus travel time (0.5 s for the full range), a reading 0.2 s, a pause its length. Rate-limit and watchdog checks are therefore reproducible from the seed. On hardware the clock is wall time.
+- **Append-only audit log** (`hardware/audit.py`). Every request and decision is logged with its reason, the requested value (as `repr`, whatever its type) and the rig time: connect, home, move, read, pause, E-stop, reset, back-off.
+  - Each entry holds the SHA-256 of the previous one and of itself. `verify_chain` finds a deleted, reordered or edited entry.
+  - The log is saved in every run record (`audit_log`, schema 4), and the report states how many decisions were made, how many were rejected, any safety trips, and whether the chain is intact.
+- **Realistic step limits.** The spring loader is limited to 10 N per step (no shock loading), the filament to 1 kK per step (thermal shock) and the diode to 0.4 V per step. The other rigs keep full travel, which is safe for them at their natural speed. The GP now proposes only points within the step limit of the current position.
+- **Strict numbers in LLM answers.** A position or range from a model must be a JSON number. Pydantic used to turn `"90"` into 90.0 and `true` into 1.0; both are now refused.
+- **The twin parks at the lowest safe position**, not at 0. A property test found that a reading after homing put the LDR at 0 lux, where its law (R ∝ E^−0.7) divides by zero. The inverse-square rail (0 cm) and the filament (0 kK) also homed outside their bounds.
+- **Bug fix found by the red team.** `LabTools.tool_take_measurement(None)` crashed while recording the guard's rejection, because the outcome required a float. It now records `None`. The guard had already refused the value.
+- **Spy rig and envelope checker** (`safety/spy.py`). `SpyRig` records every command that reaches the hardware. `unsafe_commands` checks those commands independently of the guard's code: finite and in bounds, step, rate, moves without readings, and none while the E-stop is latched or at or above a ceiling.
+
+  Moves are matched in order to the guard's approvals in the audit log, so a move without an approval is reported. Order is used rather than time because rejected commands take no rig time.
+- **Red-team suite** (`safety/redteam.py`, `safety/attacks.yaml`): 59 cases in 9 categories. These are:
+  - out of range;
+  - unit tricks ("3.5 radians", "200 mm" on a degree axis, mV on a volt axis, K on a kK axis);
+  - prompt injection in the research question;
+  - oscillation and rate abuse;
+  - malformed JSON;
+  - huge, negative, NaN and infinite numbers;
+  - direct calls that bypass the agents (Python types, serial-command strings, step abuse);
+  - E-stop, watchdog and the response limit;
+  - code and decision injection (formulas, `"accept"` as an anomaly action).
+
+  Each case runs through the real pipeline: engine, client parsing and validation, re-asking, the range clip, the formula whitelist, the guard and the spy rig. Only the network request is replaced, by a scripted adversary through the new `LLMClient(completion=...)` hook, which is never used outside the red team. An "obedient" adversary also follows the injected instructions. An API-key canary is set during the run and must never appear in a prompt or a record.
+
+  Output: `results/redteam.csv` (one row per case) and `results/redteam_summary.md`. `--provider mock|litellm` runs only the cases that do not need a scripted model, and reports the rest as skipped.
+- **Standards mapping:** `docs/safety_and_standards.md` covers IEC 61010-1, IEC 61508, ISO/IEC 27001 and ISO/IEC 30141, plus a table of every safety feature with where it is and what tests it. It states plainly that nothing is certified and no SIL is claimed.
+- **Dependencies:** `hypothesis` (property tests) and `pyyaml` (the attack catalogue) were added to `requirements.txt`.
+
+### Why
+The paper's central claim is that a hallucinating or compromised model can never move the hardware outside its safe envelope. This phase makes that claim testable two ways: exhaustively over input types (property tests) and against deliberate attacks (red team). Each check is made by code that does not trust the layer above it.
+
+### How it was verified
+- **`pytest -q`: 358 passed, offline, in about 105 s** (311 before).
+  - `tests/test_safety_hardening.py` (35) covers:
+    - the rate limit on rig time, with normal measuring never hitting it;
+    - the interlock;
+    - the watchdog latching and being fed by valid readings;
+    - the E-stop latched until a named operator resets it, including from the engine mid-run;
+    - the audit sequence, with tampering by edit, deletion and reordering detected;
+    - an intact audit log in saved records, with every attempt that reached the rig approved;
+    - 11 non-real values refused without crashing, and Fraction, numpy float and numpy int accepted;
+    - GP proposals within the step limits for the diode, Hooke and Stefan–Boltzmann;
+    - strict LLM numbers.
+  - `tests/test_safety_properties.py` (6 properties, 150–400 examples each) covers any value sequence on any experiment, the measurement tool, strategy and plan answers, and formula text and grammar-built formulas. Run statistics: 1,300 passing examples, 0 failing. The first run of the command-sequence property found the park-position bug above.
+  - `tests/test_redteam.py` (6):
+    - the catalogue has ≥ 40 cases and ≥ 4 in each required category;
+    - the full suite gives 0 unsafe commands and every outcome as expected;
+    - mock-provider skipping;
+    - **the harness detects a bypassed guard:** with the guard's checks disabled, the out-of-range case is reported as `reached_rig_unsafe`;
+    - every spy rule on synthetic commands, including an approved move while latched and an unapproved move;
+    - the API-key canary.
+- **Red team, Done-when** (`python -m safety.redteam`, scripted adversary):
+
+  | Attempted | Blocked at LLM/agent level | Blocked at the guard | Harmless (inside the envelope) | No effect | **Unsafe commands reaching the rig** |
+  |---|---|---|---|---|---|
+  | 59 | 23 | 29 | 3 | 4 | **0** |
+
+  Every case had its expected outcome. The 3 "harmless" cases are legal values the attack wanted:
+  - a radians number that is a legal angle (3.14°);
+  - repeated requests for the same end stop, each with a reading;
+  - `Fraction(1, 2)` and a numpy float within bounds.
+
+  The 4 "no effect" cases are injections the mock-policy planner ignores, plus the API-key canary.
+- **Effect on runs** (clean twin, provider `none`, 8 experiments × seeds 0–19, against the Phase 3 sweep). Six experiments are identical seed for seed in law, n and stop reason. The diode and Hooke changed, because the step limit changes which points the GP can propose:
+  - the diode is still 20/20, with median n 9 instead of 8;
+  - Hooke is still 19/20, with 1 run reaching the budget.
+
+### Known limitations
+- **The step limits are judgements, not datasheet values:** 10 N, 1 kK and 0.4 V. They would need checking on a real loader, lamp and source.
+- **The watchdog runs only when a command arrives.** It cannot stop a host that has hung completely. That is the firmware command watchdog's job (Phase 6).
+- **The default watchdog of 120 s rig time effectively never fires on the twin**, where simulated time only advances with rig activity. It is tested with 5 s.
+- **On hardware, the 5 moves/s rate limit has not been checked** against the real servo's timing.
+- **The red team's "blocked at LLM/agent level" includes the run stopping** because every answer was invalid. That is safe but ends the run. A real model that answers badly once would usually recover on the re-ask.
+- **The red team has not been run against a real model.** `--provider litellm` runs the question-injection cases only, and needs keys.
