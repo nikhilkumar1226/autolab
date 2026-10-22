@@ -10,3 +10,4 @@ pytest>=7.0.0
 litellm>=1.30.0
 pyyaml>=6.0
 hypothesis>=6.100
+streamlit>=1.40

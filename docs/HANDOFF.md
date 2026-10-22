@@ -1,86 +1,129 @@
 # Handoff notes (overnight autonomous run, 2026-10-22)
 
-Written for Nikhil when you wake up. Updated after every phase. The detailed "what changed / why / how verified" notes for each phase are in `docs/CHANGELOG.md`; this file is the short version plus everything that needs you.
+Written for Nikhil. The detailed "what changed / why / how it was verified" for every phase is in `docs/CHANGELOG.md`; this file is the short version plus everything that needs you.
 
-Rules I followed: provider `mock` (or `none`) only, no real LLM or paid API was ever called, no API key was read or printed, `.env` was never staged.
+**Summary:**
+- **Done:** Phase 2 (with the AST formula fix), then Phases 3 to 7, each with its checkpoint: tests green, CHANGELOG entry, `Phase N: …` commit, tag, push, ROADMAP boxes.
+- **Tests:** 404 pass offline in about 2 minutes (230 at the start).
+- **Not done:** everything that needs your API keys, the Wokwi licence, or a browser. Those are listed below.
+
+**What I never did:**
+- call a real LLM or any paid API (provider `mock` or `none` throughout);
+- read or print a key (the `.env` keys were empty anyway), or stage `.env`;
+- merge anything into `main`.
 
 ## Status
 
 | Phase | Branch | Tag | Tests | Done-when |
 |---|---|---|---|---|
-| 2 (fix) | `phase-2-llm-agents` | `phase-2.1` | 230 passed | 2 of 4 pass; the other 2 need your keys |
-| 3 | `phase-3-digital-twin` | `phase-3` | 311 passed | 2 of 2 pass |
-| 4 | `phase-4-safety` | `phase-4` | 358 passed | 2 of 2 pass (red team: 59 cases, 0 unsafe commands reached the rig) |
-| 5 | `phase-5-benchmark` | `phase-5` | 367 passed | 1 of 3 pass (`--quick` in 142 s); the real-LLM run and sending `results/` are yours |
-| 6 | `phase-6-firmware` | `phase-6` | 391 passed | 0 of 2: both need Wokwi in VS Code (your step 5). Firmware compiles; the full run passes against a fake port |
+| 2 (fix) | `phase-2-llm-agents` | `phase-2.1` | 230 | 2 of 4 pass; 2 need your keys |
+| 3 Digital twin, experiments, faults | `phase-3-digital-twin` | `phase-3` | 311 | 2 of 2 |
+| 4 Safety hardening, red team | `phase-4-safety` | `phase-4` | 358 | 2 of 2 (59 attacks, 0 unsafe commands reached the rig) |
+| 5 Benchmark | `phase-5-benchmark` | `phase-5` | 367 | 1 of 3 (`--quick` in 142 s); the real-LLM run is yours |
+| 6 Firmware, Wokwi | `phase-6-firmware` | `phase-6` | 391 | 0 of 2, both need Wokwi; firmware compiles, and a full run passes against a fake port |
+| 7 Dashboard | `phase-7-dashboard` | `phase-7` | 404 | 1 of 1 verified headless; please also look in a browser |
 
-## Decisions I made
+Each branch starts from the previous one, so `phase-7-dashboard` contains everything. `main` is still at the initial commit. When you have reviewed it, merging `phase-7-dashboard` into `main` is a fast-forward.
 
-- **Phase 2 tag.** `phase-2` already existed on GitHub (your save point at `55b8dc1`). I did not move it, because moving a pushed tag rewrites what others have fetched. The fixed Phase 2 is tagged **`phase-2.1`**.
-- **Branches.** I kept your pattern of one branch per phase. Each new phase branch starts from the previous one, so the last branch contains everything. `main` is still at the initial commit; I did not merge or open pull requests (that is your review step).
-- **Formula whitelist (Phase 2 fix).** I implemented exactly the whitelist you gave. Two small choices:
-  - Unary plus (`+x`) is rejected, because the list names unary minus only.
-  - Python builtin names (`open`, `eval`, `id`, …) cannot be parameter names. The evaluator never looks names up in Python, so this is defence in depth and readability, not a hole being closed.
-  - sympy used to simplify the expression to detect "does not depend on x", "parameter has no effect" and `1/0`. Without sympy these checks are numerical, at fixed probe points. Parameter kinds (scale / location / offset) come from numerical derivatives. See CHANGELOG "Phase 2 fix" for the one known limitation.
-- **sympy removed.** No code uses it now, so I removed it from `requirements.txt` and uninstalled it from `.venv` (`pip install sympy` puts it back if you ever need it).
+## Try it
 
-### Phase 3 (details and numbers in CHANGELOG "Phase 3")
-- **8 experiments, not 6.** The prompt lists 3 old + 5 new laws, so the "all 6 experiments" Done-when item was checked on all 8.
-- **Stefan–Boltzmann temperature is in kK** (0.8–2.8 kK). In kelvin the power-law amplitude's relative SE was 22%, so the run could never converge.
-- **No separate "saturating exponential" model.** It is the same family as the decaying exponential with a negative amplitude, and two identical models would tie on BIC forever. "Exponential decay" was renamed "Decaying exponential"; the key `exp_decay` is unchanged. A **growing exponential** was added for the diode.
-- **New parsimony rule** (`analysis/parsimony.py`). Without it a linear law (Hooke) can never converge, because several 3-parameter models contain a line. It changes nothing for the Phase 1 experiments (checked: 0 of 60 sweep runs differ).
-- **Outlier detection uses the best fit's prediction band, not the GP band the ROADMAP names.** The GP band was badly calibrated: 47 false alarms in 80 clean runs and 34 of 80 spikes missed, against 1 false alarm and 8 missed for the fit band. The GP band is still available as an option. I set the default before running that comparison.
-- **Default fault schedule:** spike at cycle 6, stuck actuator at 8, dropout at 10–11. The ROADMAP example (stuck at 7, dropout at 9) cannot work as intended: cycle 7 is always the automatic re-measurement after the spike. You can still pass the ROADMAP's version as JSON with `--faults`.
-- **Non-idealities are sized relative to each experiment's noise and position tolerance.** Drift was first sized relative to the response span. That was about 5 noise-σ per cycle for the precise diode and wrecked 19/20 runs, so I changed it to 0.3 noise-σ per cycle before the final sweep.
-- **Faults count rig cycles:** one cycle is one reading or one pause, re-measurements included.
+```bash
+source .venv/bin/activate
+pytest -q                                             # 404 passed
+streamlit run app/Home.py                             # dashboard: Live Lab, Run History, Benchmark, System
+python main.py --experiment diode_iv --faults default --nonideal --provider mock
+python -m safety.redteam                              # 59 attacks -> results/redteam.csv, 0 unsafe
+python -m benchmark.run --quick                       # about 2 minutes -> results/quick/
+```
 
-### Phase 4 (details in CHANGELOG "Phase 4", standards in docs/safety_and_standards.md)
-- **Simulated rig clock.** The twin keeps simulated time (moves, readings, pauses), so the rate limit and watchdog are reproducible. Hardware uses wall time.
-- **Defaults:** rate limit 5 moves/s; at most 3 moves in a row without a reading (my addition: the rate limit alone cannot stop a slow full-travel oscillation); watchdog 120 s, which is generous because real LLM calls sit between readings on hardware.
-- **Step limits:** 10 N per step for the spring, 1 kK for the filament, 0.4 V for the diode. These are my judgement, not datasheet values; please check them. The GP now proposes only reachable points.
-- **E-stop reset needs an operator name** (`reset_estop(operator="...")`), and it is logged.
-- **The red team uses a scripted adversary** through a new `completion=` hook in `LLMClient`. It replaces only the network call and is not used anywhere else. No real model was called.
-- **The twin now parks at the lowest safe position**, not at 0. A property test found that the LDR read 0 lux after homing and divided by zero.
-
-### Phase 5 (details in CHANGELOG "Phase 5"; numbers in results/RESULTS.md)
-- **`results/` is filled from `--full --provider mock`:** 3,680 runs. The grid, random and GP-only rows are real benchmark data; the LLM-method rows are mock and labelled as such everywhere. Your real-LLM run reuses the baseline rows and reruns only the LLM methods.
-- **LLM-only needed a sampler, which I added** (`--sampler llm`). The mock policy, and the fallback when there is no LLM, is a fixed rule: the point where the two best models disagree most, or else the middle of the widest gap.
-- **Equal budget** means each baseline runs to exactly AutoLab's median n for that experiment and condition.
-- **Learning curves** come from separate 20-point runs on the clean twin.
-- **Cost estimates for mock runs** price characters / 4 with litellm's bundled price for `anthropic/claude-haiku-5-5`. **INR uses an assumed 88 INR/USD**; set the real rate with `--usd-inr`.
-- **`results/quick/` is git-ignored;** it is a 2-minute smoke test.
-
-### Phase 6 (details in CHANGELOG "Phase 6"; how-to in docs/wokwi.md)
-- **The sketch moved to `firmware/arduino_rig/arduino_rig.ino`**, because arduino-cli needs that layout. The default build is `SENSOR_EMULATED` (Malus's law on the chip, same values as the twin). The `.hex` and `.elf` for Wokwi are committed, so you don't need to compile anything.
-- **I compiled all three sensor variants** with a temporary arduino-cli in the scratchpad; nothing was installed on your Mac.
-- **Firmware watchdog: 300 s** without a command releases the servo and latches the E-stop (long, because real LLM calls sit between moves).
-- **`wokwi.toml` and `diagram.json` are in the project root**, where the Wokwi extension looks.
-- **Rate limit 10 moves/s** (was 5): the real firmware alone can do about 8/s legitimately.
-- **`--hardware` now works for `malus_law` only.**
+Results for the report are in `results/`: `RESULTS.md`, `benchmark_*.csv`, `figures/`, `redteam*.{csv,md}`, `phase3_twin_sweep.csv` and the Phase 1 sweeps. **The LLM-method rows in the benchmark are mock.** RESULTS.md says so at the top.
 
 ## What you must do yourself
 
-1. **`.env` layout.** Your `.env` still has the old Groq/Ollama layout. Copy the layout from `.env.example` (Claude first, then the two Gemini models) and add `ANTHROPIC_API_KEY` and `GEMINI_API_KEY`. I did not touch `.env`.
-2. **Phase 2 open Done-when items** (need keys):
-   - `python -m llm.check` → should print OK for Claude and Gemini.
-   - `python main.py --provider litellm` → check the run JSON in `runs/` shows the real prompts, responses, tokens and cost.
-
-3. **The real-LLM benchmark** (Phase 5 Done-when). With the Claude key in `.env`:
-   - Check first: `python -m benchmark.run --full --provider litellm --dry-run`.
+1. **Update the `.env` layout.** Your `.env` still has the old Groq/Ollama layout. Copy the layout from `.env.example` (Claude first, then the two Gemini models) and add `ANTHROPIC_API_KEY` and `GEMINI_API_KEY`. I did not touch `.env`.
+2. **Phase 2 checks** (need keys):
+   - `python -m llm.check` should print OK for Claude and Gemini.
+   - `python main.py --provider litellm`: then check that the run JSON in `runs/` shows the real prompts, answers, tokens and cost.
+3. **The real-LLM benchmark** (Phase 5 Done-when), with the Claude key in `.env`:
+   - Look first: `python -m benchmark.run --full --provider litellm --dry-run`.
    - Small first run (2 seeds, clean twin, about 1,600 calls): `python -m benchmark.run --full --provider litellm --llm-seeds 2 --conditions clean --workers 2`.
-   - Full run: `python -m benchmark.run --full --provider litellm --workers 2`. With the mock policies it made about 6,700 calls. Estimated about $0.6 at the bundled Haiku price, but check the Anthropic Usage page after the first few runs.
-   - The Gemini free tier (about 20/day on Flash) cannot cover this; Claude credit is needed. Answers are cached, so a rerun is free.
+   - Full run: `python -m benchmark.run --full --provider litellm --workers 2`. The mock policies made about 6,700 calls. That is estimated at about $0.6 at litellm's bundled Haiku price, but check the Anthropic Usage page after the first runs.
+   - The Gemini free tier (about 20 per day on Flash) cannot cover this, so Claude credit is needed. Answers are cached, so a rerun is free. The baseline rows are reused; only the LLM methods rerun.
    - Then send me `results/`.
-4. **Red team against a real model** (optional, costs a little): `python -m safety.redteam --provider litellm --out results/redteam_litellm.csv` runs the prompt-injection cases against Claude/Gemini.
-5. **Wokwi (Phase 6 Done-when):**
-   - Install the Wokwi Simulator extension in VS Code.
-   - F1, then **Wokwi: Request a New License**.
-   - F1, then **Wokwi: Start Simulator**; keep the tab visible.
-   - Run `python main.py --experiment malus_law --hardware --port rfc2217://localhost:4000 --provider mock`.
-   - Take a screenshot of the circuit for the black book.
-   - Details and troubleshooting are in `docs/wokwi.md`.
+4. **Red team against a real model** (optional, cheap): `python -m safety.redteam --provider litellm --out results/redteam_litellm.csv`. It runs the prompt-injection cases only.
+5. **Wokwi** (Phase 6 Done-when):
+   1. Install the Wokwi Simulator extension in VS Code.
+   2. F1, then **Wokwi: Request a New License**.
+   3. F1, then **Wokwi: Start Simulator**, and keep its tab visible.
+   4. Run `python main.py --experiment malus_law --hardware --port rfc2217://localhost:4000 --provider mock`.
+   5. Screenshot the circuit and save it as `docs/img/wokwi_circuit.png`; the System page shows it.
+
+   Details are in `docs/wokwi.md`.
+6. **Dashboard in a browser** (Phase 7): run `streamlit run app/Home.py`, start a run on Live Lab, and press E-STOP once mid-run. I checked this headless only.
+   - To use the real LLM there, also set `APP_PASSWORD` in `.env` and type it into the sidebar.
+   - Without a password the dashboard always uses mock, even locally. That is deliberate, to protect the credit on the hosted app.
+7. **Review my judgement calls** (listed below), in particular the step limits and the default fault schedule.
+
+## Decisions I made
+
+### Phase 2 fix
+- **Phase 2 tag.** `phase-2` already existed on GitHub. I did not move it, because moving a pushed tag rewrites history others may have fetched. The fixed version is **`phase-2.1`**.
+- **The formula whitelist is exactly yours.** Two small additions:
+  - unary plus is rejected;
+  - Python builtin names (`open`, `eval`, …) cannot be parameter names.
+- **sympy's checks became numerical.** sympy simplification used to catch "no x", "parameter has no effect" and `1/0`. These are now numerical checks at fixed probe points, and parameter kinds come from numerical derivatives.
+- **sympy removed** from `requirements.txt` and from `.venv`.
+
+### Phase 3
+- **8 experiments.** "All 6 experiments" was checked on all 8 (3 old + 5 new).
+- **Stefan–Boltzmann temperature is in kK.** In kelvin, the power-law amplitude's relative SE was 22% and the run could never converge.
+- **No separate saturating exponential.** It is the decaying exponential with a negative amplitude, and duplicate models tie on BIC forever. That model is renamed "Decaying exponential" (key unchanged), and a growing exponential was added for the diode.
+- **Parsimony rule.** A model with more parameters that has the same curve as a simpler one is not counted as a rival. Without this, a linear law can never converge. It changes none of the Phase 1 results (0 of 60 runs differ).
+- **Outlier detection uses the best fit's prediction band (Student-t), not the GP band** the ROADMAP names. The GP band gave 47 false alarms in 80 clean runs; the fit band gave 1. I set the default before running the comparison.
+- **Default fault schedule:** spike at cycle 6, stuck actuator at 8, dropout at 10–11. In the ROADMAP's example, the stuck actuator at cycle 7 always falls on the spike's re-measurement.
+- **Non-idealities scale with each experiment's noise and position tolerance.** Drift is 0.3 noise-σ per cycle; the first version, relative to the response span, swamped the precise diode.
+
+### Phase 4
+- **The twin keeps a simulated rig clock**, so the rate limit and watchdog are reproducible.
+- **Moves-without-reading interlock (3)**, my addition: a slow full-travel oscillation stays under any sensible rate limit.
+- **Rate limit 10 moves/s** (raised from 5 in Phase 6, because the real firmware can legitimately reach about 8/s).
+- **Watchdog 120 s of rig time**, generous because real LLM calls happen between readings on hardware.
+- **Step limits: 10 N, 1 kK and 0.4 V** for the spring, filament and diode. These are judgements, not datasheet values. The GP proposes only reachable points.
+- **An E-stop reset needs an operator name**, and the reset is logged.
+- **The red team's scripted adversary** goes through a new `completion=` hook in `LLMClient`, used nowhere else.
+
+### Phase 5
+- **`results/` comes from `--full --provider mock`:** 3,680 runs. The baseline rows are final. The LLM rows are mock, and labelled as such in the CSV, the figures and RESULTS.md, together with the check that AutoLab-mock is identical to GP-only on all 120 shared runs.
+- **LLM-only got its own sampler** (`--sampler llm`). Its mock and no-LLM rule is: where the top two models disagree most, else the middle of the widest gap.
+- **The INR rate is an assumption: 88 per USD** (`--usd-inr` sets the real one). Mock cost estimates use characters / 4 and litellm's bundled price for `anthropic/claude-haiku-5-5`.
+
+### Phase 6
+- **The sketch moved to `firmware/arduino_rig/arduino_rig.ino`**, the layout arduino-cli needs. The emulated build's `.hex` and `.elf` are committed, so Wokwi works without compiling.
+- **I compiled all three sensor builds** with a temporary arduino-cli in the scratchpad; nothing was installed on your Mac.
+- **Firmware watchdog: 300 s.**
+- **`--hardware` supports `malus_law` only.**
+- **The emulated sensor uses a fixed seed (12345).**
+
+### Phase 7
+- **The dashboard drives the digital twin only;** hardware stays on the CLI.
+- **Logic lives in `app/lib/`;** the pages only render. A run happens in a background thread, so E-STOP can reach it.
+- **The real LLM needs a key, `APP_PASSWORD`, and the password entered.** Per session: at most 10 runs, at most 3 with a real LLM; budgets capped at 30 measurements (20 with a real LLM).
+
+### Environment
+- Installed into `.venv`: `hypothesis`, `streamlit` (and its dependencies). Uninstalled: `sympy`.
+- `requirements.txt` was updated to match. Phase 8 still has to pin versions.
+
+## Bugs found by the new tests, and fixed
+
+- **The LDR read 0 lux after homing and divided by zero** (found by a property test). The twin homed to 0, outside the LDR's bounds; the inverse-square rail and the filament also homed outside theirs. The twin now parks at the lowest safe position.
+- **`math.isfinite(10**400)` raised inside the guard's type check** (found by the red team). The guard now converts values carefully.
+- **`tool_take_measurement(None)` crashed while recording the guard's rejection** (found by the red team).
+- **The serial driver silently retried a lost reply,** because `TimeoutError` is an `OSError`. It now surfaces as a timeout, which the guard flags.
+- **A bare `MOVE abc` would have meant "move to 0°" on the old firmware** (`String.toFloat`). The new firmware rejects it with E_SYNTAX.
 
 ## Open questions
 
-- **Random outliers are rarely caught** (8 of 68 in the sweep), because most runs stop at n = 8, when a fit has too few degrees of freedom to call anything an outlier at p = 0.001. Option: calibrate each instrument's noise once (repeated readings at one position) and use it for detection. Should we add that calibration step?
-- **Hooke with faults converged on cos² in 4/20 runs** (cos² over 0–20 "degrees" is almost a straight line). Raising `min_points` for all experiments, or turning on predictive stability, would probably fix it but costs measurements. Your call after the Phase 5 benchmark.
+- **Random outliers are rarely caught:** 8 of 68 in the Phase 3 sweep, 31 of 230 in the benchmark. Most runs stop at n = 8, when a fit has too few degrees of freedom to call anything an outlier at p = 0.001. Should we add a one-time noise calibration per instrument (repeated readings at one position), so detection can use a known noise level?
+- **Hooke with faults converged on cos² in about 1 run in 5** (cos² over 0–20 "degrees" is almost a straight line). A higher `min_points`, or the predictive-stability criterion, would probably fix it at the cost of measurements. Decide after the real benchmark?
+- **Are the step limits right** for a real spring loader, lamp and voltage source?
+- **Phase 8** (deploy and CI) was outside this run, so it has not started.
