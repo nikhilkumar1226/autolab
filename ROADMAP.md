@@ -285,8 +285,8 @@ When done, stop and summarise what you built; I will then run the Phase checkpoi
 ```
 
 **Done when:**
-- [ ] `results/redteam.csv` exists and the "reached rig" count is 0.
-- [ ] The property tests pass.
+- [x] `results/redteam.csv` exists and the "reached rig" count is 0. (59 cases; 0 unsafe commands reached the rig; summary in `results/redteam_summary.md`.)
+- [x] The property tests pass. (`tests/test_safety_properties.py`: 6 properties, 1,300 generated examples.)
 
 ---
 
