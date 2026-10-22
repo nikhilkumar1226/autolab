@@ -383,7 +383,7 @@ Phase checkpoint.
 ```
 
 **Done when:**
-- [ ] The dashboard runs locally, and a live run updates step by step.
+- [x] The dashboard runs locally, and a live run updates step by step. (Checked headless: `streamlit run app/Home.py` serves and its health check answers ok; a live run's snapshots arrive one measurement at a time; every page renders under Streamlit's AppTest; E-STOP aborts a run mid-way. Not yet looked at in a browser: see docs/HANDOFF.md.)
 
 ---
 
