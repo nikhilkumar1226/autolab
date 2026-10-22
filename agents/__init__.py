@@ -3,11 +3,13 @@ Agent models, personas, and orchestrator package.
 """
 from agents.models import (
     AgentText,
+    AnomalyDecision,
     AnalystReport,
     AnalystReview,
     CandidateEvaluation,
     Discussion,
     ExecutionOutcome,
+    ExpectedBand,
     ExperimentStep,
     GPCurve,
     GPSuggestion,
@@ -20,11 +22,13 @@ from agents.models import (
 
 __all__ = [
     "AgentText",
+    "AnomalyDecision",
     "AnalystReport",
     "AnalystReview",
     "CandidateEvaluation",
     "Discussion",
     "ExecutionOutcome",
+    "ExpectedBand",
     "ExperimentStep",
     "GPCurve",
     "GPSuggestion",

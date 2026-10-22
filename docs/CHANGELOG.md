@@ -313,3 +313,134 @@ CLAUDE.md rule 2 forbids `eval`/`exec` of LLM output. `parse_expr` uses `eval`, 
 
 ### Known limitations
 - The numerical structure checks use fixed probe points. An expression that is finite only in a narrow x-range that none of the 33 probe points hits (for example `sqrt(x - 1234)`) is rejected as undefined, even though it might fit data in that range.
+
+## Phase 3: Realistic digital twin, new experiments, fault injection (2026-10-22)
+
+### What changed
+- **Non-idealities in the digital twin** (`hardware/simulator.py`, `config.NonIdealityConfig`). All are off by default, switched on together with `--nonideal`, and each can be set to 0 on its own. Sizes are relative to the experiment's spec (noise std, position tolerance), so one setting suits every experiment:
+
+  | Non-ideality | Default when on | What it does |
+  |---|---|---|
+  | Polariser extinction ratio | 100 | Crossed polarisers still pass 1/100 of the lamp (Malus only) |
+  | Ambient drift | step of 0.3 × noise std per cycle | Random walk added to every reading (about 1.5 σ after 25 cycles) |
+  | Saturation | on | Readings clip at the sensor's full scale |
+  | ADC quantisation | on | Readings round to the sensor resolution |
+  | Actuator position error | σ = 0.15 × position tolerance | Gaussian error in where the actuator really goes |
+  | Backlash | 0.3 × position tolerance | Offset that depends on the direction of the last move |
+  | Outlier spikes | 3% of readings, ±8 σ | Random-sign spikes |
+
+  The rig reports the **commanded** position, as an open-loop controller does, so position error and backlash reach the data as errors in x. It also returns a coarse position feedback (quantised to a quarter of the tolerance) and a cycle counter. With non-idealities off and no faults, the twin draws exactly one normal number per reading, as in Phase 1.
+- **Five new experiments** in the registry. Each ground truth is written in physical form with physical parameters (`physical_params`). `true_params` gives the same law in library form for scoring, and a test checks that the two agree. The agent descriptions name the apparatus but not the law; the hint-word test was extended (Shockley, Hooke, Stefan, Boltzmann, power law, proportional, linear, …).
+
+  | Experiment | x (units, bounds) | y (units) | Truth (physical form) | Library model |
+  |---|---|---|---|---|
+  | rc_charging | sampling delay (ms, 0–250) | capacitor voltage (V) | V = Vs (1 − e^(−t/RC)), Vs = 3.3 V, R = 10 kΩ, C = 4.7 µF | Decaying exponential, A = −3.3 |
+  | diode_iv | forward voltage (V, 0–0.8) | current (mA) | I = Is (e^(V/(n Vt)) − 1), Is = 2 nA, n = 1.9, T = 300 K | Growing exponential, C = −Is |
+  | ldr_response | illuminance (lux, 10–1000) | resistance (kOhm) | R = R1 E^(−γ), R1 = 500 kΩ, γ = 0.7 | Power law |
+  | hookes_law | applied force (N, 0–20) | end position (mm) | L = L0 + F/k, L0 = 50 mm, k = 0.25 N/mm | Linear |
+  | stefan_boltzmann | filament temperature (kK, 0.8–2.8) | detected power (mW) | P = f ε σ A (T⁴ − Ta⁴), ε = 0.35, A = 20 mm², f = 1%, Ta = 300 K | Power law |
+
+  Stefan–Boltzmann uses kilokelvin on purpose. With T in kelvin, the power-law amplitude and exponent are almost perfectly correlated (x ≈ 1000–3000), the amplitude's relative SE was 22% in the prototype, and the run could never meet the 5% criterion. In kK, x ≈ 1 and both are well determined.
+- **Model library.** A **growing exponential**, y = A e^(kx) + C with k > 0, was added; it covers the Shockley diode. A separate saturating exponential was **not** added: A(1 − e^(−kx)) + C is the decaying exponential with negative amplitude, and two identical families would tie forever on BIC. That model is renamed from "Exponential decay" to **"Decaying exponential"** (key `exp_decay` unchanged), because it also fits a charging capacitor.
+- **Parsimony rule** (`analysis/parsimony.py`). Several 3-parameter models contain a straight line (a quadratic with a = 0, a power law with b = 1, an exponential with k → 0). With linear data they fit as well as the line and sit within ΔBIC ≈ ln n of it, so ΔBIC ≥ 6 could never be met. In the prototype, BIC alone also picked a curved model in 6 of 20 Hooke runs. The rule: if a model with fewer parameters has the same curve as the lowest-BIC model (within 0.5 σ everywhere on the measured range), the simpler model wins and the other is marked redundant. Any other fit with more parameters and the same curve as the best is also redundant. Redundant fits stay in the table, marked "not counted: parsimony", but are not the best model, the runner-up or part of ΔBIC. If every rival is redundant, the ΔBIC criterion passes and the record says so.
+- **Instruments in the spec.** Each spec now has the sensor's range and resolution, the actuator's position tolerance and, for the diode, a 30 mA response limit. The safety guard is built from them (`SafetyLimits.from_spec`).
+- **Fault injection** (`config.FaultSpec`, `--faults`). There are three types:
+  - `light_spike`: a transient spike of 0.5 × the response span;
+  - `sensor_dropout`: NaN or a timeout, for `duration` cycles;
+  - `stuck_actuator`: the move is acknowledged but not executed, and the feedback keeps reporting the old position.
+
+  `at_step` counts **rig cycles**: one cycle is one sensor read or one pause, so re-measurements count. `--faults default` is spike at cycle 6, stuck at 8, dropout at 10–11. This differs from the ROADMAP example (stuck at 7, dropout at 9) for two reasons:
+  - cycle 7 is always the automatic re-measurement after the cycle-6 spike, at the same position, so a stuck actuator there can never act;
+  - most runs stop at n = 8 (about cycle 11), so a later dropout is usually never reached.
+
+  The ROADMAP schedule can still be passed as JSON.
+- **Detection** (`hardware/safety_guard.py`). The guard flags readings that are:
+  - `non_finite`, or a sensor `timeout` (returned as a flagged reading, not raised);
+  - `saturated` (at full scale) or `out_of_range`;
+  - `position_mismatch`: the feedback is off the command by more than the tolerance;
+  - `response_limit`;
+  - `outlier`: outside the predictive band of the current best fit.
+
+  The model band's σ combines the noise (residual std, floored) and the fitted curve's own uncertainty (delta method on the new parameter covariance). Its threshold is a Student-t quantile with n − k degrees of freedom at two-sided p = 0.001. The ROADMAP asked for the GP's band; it is still available (`outlier_bands = "gp"` or `"both"`) but is not the default, because the comparison below showed it is badly calibrated on these curves.
+- **Recovery** (`agents/orchestrator.py`). A flagged reading never enters the data.
+  1. The Executor re-measures once.
+  2. If the reading is flagged again, the Analyst decides: re-measure, pause, or discard the position. With an LLM it gets a blind payload (variable names, flags, readings, bands); the mock and `none` use the same heuristic (pause on a dropout, discard at saturation, otherwise re-measure).
+  3. After 2 Analyst decisions the position is discarded.
+
+  Supporting rules:
+  - A discarded position is never proposed by the GP again.
+  - An outlier is accepted after all if a re-measurement agrees with it within 3√2 σ. That only happens when the expectation, not the sensor, was wrong.
+  - Above the response limit, the guard backs the actuator off to its minimum, refuses that position and anything above it for the rest of the run, and the GP respects that ceiling.
+- **Fault scoring** (`records/faults.py`). After the run, the twin's fault log (ground truth, never seen by detection) is compared with what was flagged. Each fault is `recovered`, `missed`, `detected_not_recovered`, `no_effect` or `not_reached`. Random outliers are scored the same way. Flags at cycles where nothing was injected are counted as false alarms.
+- **Run record schema 3:** per-attempt flags, bands, handling and rig cycle; `faults`; `fault_summary`; physical parameters in the experiment snapshot. Schema 1 and 2 records still load.
+- **Display.**
+  - A new `anomaly` event, shown on the console as `FLAGGED (...) -> action [who]: reason`, and a fault table at the end.
+  - The report has a "Digital twin" header line, a "Reading checks" method bullet, and tables of flagged readings and faults.
+  - The Writer receives the twin settings and fault outcomes as facts.
+- **New Analyst prompt** `ANOMALY_SYSTEM`; `PROMPT_VERSION` = `phase3-v1`.
+- **CLI:** `--nonideal`, and `--faults none|default|<JSON list>|<JSON file>`. Both are included in the rerun command.
+- **`scripts/twin_sweep.py`** writes `results/phase3_twin_sweep.csv`.
+
+### Why
+A perfect simulator makes any method look perfect. Drift, saturation, position error and faults are what a real bench does, and recovering from them is where an agent can earn its place. The five EE-flavoured laws widen blind discovery beyond optics.
+
+### How it was verified
+- **`pytest -q`: 311 passed, offline, in about 75 s** (230 before).
+  - `tests/test_twin.py` covers each non-ideality on the rig: one draw per reading when off, extinction ratio, drift as a seeded random walk, saturation, quantisation to the ADC step, position error reaching the physics while the command is reported, backlash by direction, logged outliers, and reproducibility with everything on. It also covers each fault: a spike only at its cycle, NaN and timeout dropouts, a stuck actuator with feedback, and a pause as a cycle.
+  - `tests/test_faults.py` covers:
+    - every guard flag, including a timeout turned into a flagged reading;
+    - the response-limit back-off and ceiling, the GP respecting the ceiling, and no kept reading over the limit;
+    - each default fault detected and recovered in a closed-loop run, with the dropout's second flag going to the Analyst;
+    - a blind anomaly prompt, in normal and blind mode;
+    - provider `none` matching `mock`;
+    - an LLM "discard" being followed and the position never proposed again;
+    - a confirmed outlier being accepted;
+    - a tiny spike scored as missed, and a late fault as not reached;
+    - the scoring rules on synthetic input;
+    - the band choice (model, GP, both);
+    - parsimony (a line preferred over a lower-BIC curve, curved laws unchanged, all-redundant rivals passing ΔBIC);
+    - the CLI flags, console and report.
+  - **Done when, as a test:** all 8 experiments run with the default faults and every non-ideality on, and the saved JSON lists each fault with status, detected, recovered and missed.
+- **The library changes alone left Phase 1 unchanged.** After the growing exponential and the parsimony rule were added, and before the reading checks existed, the Phase 1 sweep (config B, 3 experiments × seeds 0–19) was rerun: 0 of 60 runs differed in best model, stop reason, n, ΔBIC, maximum relative SE or runner-up.
+- **Outlier band, chosen before the comparison and then checked.** The default (best-fit band, Student-t, p = 0.001) was set before this comparison was run. Setup: provider `none`, 8 experiments × seeds 0–9, once with the default faults and once clean (160 runs per row):
+
+  | Band | Spike recovered / missed | False alarms (80 clean runs) | Correct law (80 faulty runs) | Mean n (faulty) |
+  |---|---|---|---|---|
+  | GP band, z > 4 | 46 / 34 | 47 | 67/80 | 17.8 |
+  | GP and best fit, both z > 4 equivalent | 15 / 65 | 0 | 53/80 | 25.7 |
+  | **Best fit, Student-t, p = 0.001 (default)** | **72 / 8** | **1** | **77/80** | **11.6** |
+  | Best fit, Student-t, p = 0.0001 | 17 / 63 | 0 | 54/80 | 25.2 |
+
+  The GP band fails in both directions on these curves. It is too narrow on steep curves: genuine readings had z up to 16 (inverse-square at 9 cm). It is too wide elsewhere: a diode spike had z = 0.7, while the 5-point exponential fit put it at z = 98.
+- **Seeded sweep of the twin**, `python -m scripts.twin_sweep` → `results/phase3_twin_sweep.csv`: provider `none`, 3 conditions × 8 experiments × seeds 0–19, 480 runs. Every row has its rerun command.
+
+  | Condition | Correct law | Spike recovered / missed | Stuck actuator recovered | Dropout recovered | Random outliers detected | False alarms |
+  |---|---|---|---|---|---|---|
+  | clean | 158/160 | – | – | – | – | 1 |
+  | faults | 150/160 | 143 / 17 | 160/160 | 160/160 | – | 0 |
+  | faults + non-idealities | 150/160 | 138 / 22 | 160/160 | 160/160 | 8/68 | 0 |
+
+  Per experiment, clean: malus 20/20, inverse-square 19/20, Beer–Lambert 20/20, RC 20/20, diode 20/20, LDR 20/20, Hooke 19/20, Stefan–Boltzmann 20/20. Median n is 8 everywhere except inverse-square (20.5).
+
+  With faults, the misses are inverse-square 14/20 and Hooke 16/20; every other experiment is 20/20. With faults and non-idealities, the misses are inverse-square 12/20 and LDR 18/20.
+
+  A missed spike costs accuracy: with faults, the law was right in 138 of the 143 runs where the spike was recovered, but in only 12 of the 17 where it was missed.
+- **Clean runs against Phase 1.** Clean malus, inverse-square and Beer–Lambert runs match the Phase 1 sweep (config B) in best model, stop reason and n for 59 of 60 seeds. The exception is inverse-square seed 4: one genuine reading was flagged, the re-measurement confirmed it, and that changed later noise draws. The run still found the right law, at n = 14 instead of 15.
+- **Done when, from the CLI** (`python main.py --experiment <name> --seed 0 --provider mock --no-report`, with `--faults default --nonideal` and without):
+  - all 8 experiments ran both ways;
+  - without faults, every record has an empty `faults` list;
+  - with faults, every record lists light_spike, stuck_actuator and sensor_dropout, each `recovered`;
+  - all 16 runs found the right law; 15 converged and inverse-square with faults used its budget.
+
+### Known limitations
+- **Spikes early in a run, and small random outliers, are often missed.** Most runs stop at n = 8, so readings are checked against fits with only 1–5 residual degrees of freedom. At p = 0.001 the Student-t threshold is then 636, 31.6, 12.9, 8.6 and 6.9 band-σ. Only 8 of 68 random ±8σ outliers were caught. A missed spike can mislead the fit: inverse-square with faults was 14/20.
+
+  A noise level calibrated once per instrument (repeated readings at one position) would allow normal quantiles. Using the twin's true noise for that would leak ground truth into detection, so it was not done.
+- **Hooke with faults: 4/20 converged on cos² at n = 8–9.** Over 0–20 "degrees" a cos² arc is almost straight, and with 8 points it beat the line by ΔBIC ≥ 6. In seed 11 that was ΔBIC 13.9, driven by an end point 1.9σ low. The parsimony rule does not apply, because the curves differ by more than 0.5σ. A higher `min_points` or predictive stability would probably help; neither was tried here.
+- **Linear laws from fixed data.** With 20 evenly spaced points, a curved model beats the line by BIC in 3 of 20 Hooke seeds, so that static test accepts ≥ 17/20.
+- **Position feedback exists only on the twin.** The SG90 servo planned for Phase 6 has none, so on that rig a stuck actuator can only show up through its readings.
+- **The response-limit ceiling assumes the reading rises with the position**, as a diode's current does. If the bounds are set wrongly (0.9 V instead of 0.8 V in the test), the guard trips repeatedly and the run ends as a safety abort. That is the safe outcome, but no data comes back.
+- **The extinction ratio changes the effective parameters.** With non-idealities on, Malus data follow A' = A(1 − 1/ER) = 990 and C' = C + A/ER = 25, not 1000 and 15. Phase 5 scoring must use the effective values.
+- **A pause on the twin is one cycle of simulated time**, not a real wait. On hardware it is a real `sleep`.
+- **Anomaly decisions have only been made by the heuristic and the mock**, never by a real LLM. The mock uses the heuristic, so mock and `none` runs agree.
+- **The ROADMAP's GP band is not the default**, for the reasons in the table above. It remains available as `outlier_bands = "gp"` or `"both"`.

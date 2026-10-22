@@ -10,16 +10,22 @@ from config import SystemConfig
 from experiments.registry import get_experiment, list_experiments
 
 # Words that would hint at the law if an agent saw them.
-LAW_HINTS = ["malus", "cos", "inverse", "square", "exponential", "exp(", "beer", "lambert", "law"]
+LAW_HINTS = ["malus", "cos", "inverse", "square", "exponential", "exp(", "beer", "lambert", "law",
+             "shockley", "hooke", "stefan", "boltzmann", "power law", "fourth", "proportional", "linear", "time constant"]
 
 
-def test_three_experiments_with_their_own_bounds_and_units():
-    assert set(list_experiments()) == {"malus_law", "inverse_square_law", "beer_lambert_law"}
+def test_eight_experiments_with_their_own_bounds_and_units():
     expected = {
         "malus_law": ((0.0, 180.0), "deg"),
         "inverse_square_law": ((5.0, 100.0), "cm"),
         "beer_lambert_law": ((0.0, 100.0), "mg/L"),
+        "rc_charging": ((0.0, 250.0), "ms"),
+        "diode_iv": ((0.0, 0.8), "V"),
+        "ldr_response": ((10.0, 1000.0), "lux"),
+        "hookes_law": ((0.0, 20.0), "N"),
+        "stefan_boltzmann": ((0.8, 2.8), "kK"),
     }
+    assert set(list_experiments()) == set(expected)
     for name, (bounds, units) in expected.items():
         spec = get_experiment(name)
         assert spec.safe_bounds == bounds

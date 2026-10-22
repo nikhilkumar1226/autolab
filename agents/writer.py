@@ -14,6 +14,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set
 
 from agents.models import Discussion, WriterOutput
 from agents.prompts import PROMPT_VERSION, WRITER_SYSTEM, round_floats, to_payload
+from config import describe_twin
 from llm.client import LLMClient, NotAvailable
 from records.run_record import RunRecord
 
@@ -43,8 +44,18 @@ def build_facts(record: RunRecord) -> Dict[str, Any]:
                         ("budget", stop.budget), ("stable_best", stop.stable_best), ("prediction", stop.prediction)]:
             if c is not None:
                 criteria.append({"criterion": name, "value": c.value, "threshold": c.threshold, "met": c.passed})
+    flagged = [s for s in record.steps if s.status == "anomaly"]
+    summary = record.fault_summary
     return {
         "data_source": record.data_source.value,
+        "digital_twin": describe_twin(record.config) or None,
+        "flagged_readings": len(flagged),
+        "injected_faults": None if summary is None else {
+            "scheduled": summary.scheduled, "reached": summary.reached, "detected": summary.detected,
+            "recovered": summary.recovered, "missed": summary.missed,
+            "random_outliers": summary.outliers, "random_outliers_detected": summary.outliers_detected,
+            "false_alarms": sum(summary.unexplained.values()),
+        },
         "research_question": record.question,
         "apparatus": view.description,
         "variables": {

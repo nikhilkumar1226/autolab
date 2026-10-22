@@ -29,6 +29,7 @@ from analysis.candidate_models import (
     predict_fit,
 )
 from analysis.diagnostics import Disagreement, ResidualSummary, max_disagreement, residual_summary
+from analysis.parsimony import apply_parsimony
 
 __all__ = [
     "AnalysisResult",
@@ -55,4 +56,5 @@ __all__ = [
     "ResidualSummary",
     "max_disagreement",
     "residual_summary",
+    "apply_parsimony",
 ]

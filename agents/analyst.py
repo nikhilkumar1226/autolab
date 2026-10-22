@@ -12,17 +12,21 @@ the Planner's hypothesis. It returns an interpretation and may propose ONE new c
 model per review. The proposal is compiled by analysis/candidate_models.py (whitelist
 only, never executed), fitted with curve_fit and checked for equivalence with the existing
 fits. It is then added to the ranking, or rejected with the reason logged.
+
+After ranking, analysis/parsimony.py marks fits that reproduce a simpler model's curve with
+more parameters; they stay in the table but do not count as the best model or the runner-up.
 """
 import logging
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from agents.models import AnalystReport, AnalystReview, CandidateEvaluation
-from agents.prompts import ANALYST_SYSTEM, PROMPT_VERSION, to_payload
+from agents.models import AnalystReport, AnalystReview, AnomalyDecision, AnomalyHandling, CandidateEvaluation
+from agents.prompts import ANALYST_SYSTEM, ANOMALY_SYSTEM, PROMPT_VERSION, to_payload
 from analysis.candidate_models import CandidateModelSpec, FormulaRejected, compile_candidate, drop_equivalent
 from analysis.diagnostics import residual_summary
 from analysis.model_library import MODEL_LIBRARY, AnalysisResult, CandidateModel, SkippedModel, fit_library, fit_model
+from analysis.parsimony import apply_parsimony
 from experiments.registry import AgentExperimentView
 from llm.client import LLMClient, NotAvailable
 
@@ -52,6 +56,18 @@ def mock_review(payload: Dict[str, Any]) -> Dict[str, Any]:
             "residual_comment": comment, "candidate_model": None}
 
 
+def heuristic_anomaly(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """The no-LLM rule for a reading flagged twice (also the mock policy, so mock and none runs agree)."""
+    flags = set(payload["flags"])
+    if flags & {"non_finite", "timeout"}:
+        return {"action": "pause", "reason": "No valid reading twice: likely a transient sensor dropout, so wait, then re-measure."}
+    if flags & {"saturated", "out_of_range"}:
+        return {"action": "discard", "reason": "The sensor is at the end of its range here, so another reading cannot give a valid value."}
+    if "position_mismatch" in flags:
+        return {"action": "remeasure", "reason": "The actuator did not reach the commanded position; command it again."}
+    return {"action": "remeasure", "reason": "The reading disagrees with the expected band and with the earlier reading; take another."}
+
+
 class DataAnalystAgent:
     """
     Fits every candidate model, ranks them by BIC and reports delta-BIC to the runner-up.
@@ -77,6 +93,7 @@ class DataAnalystAgent:
         result = fit_library(x_data, y_data, iteration=iteration, models=[*self.models, *self.llm_models])
         if self.llm_models:
             result = drop_equivalent(result, x_data, y_data, self.equivalence_sigma, self.noise_floor_rel)
+        result = apply_parsimony(result, x_data, y_data, self.equivalence_sigma, self.noise_floor_rel)
         if result.best is not None:
             logger.info(
                 "Analyst [iter %d, n=%d]: best %s, delta-BIC to runner-up %s",
@@ -147,6 +164,26 @@ class DataAnalystAgent:
             llm_call_id=call.id,
         )
         return analysis, review
+
+    # --- anomalies ------------------------------------------------------------------
+    def decide_anomaly(self, payload: Dict[str, Any], step: int) -> AnomalyHandling:
+        """Remeasure, pause or discard after a reading was flagged twice. Heuristic without an LLM."""
+        if self.client is not None:
+            try:
+                decision = self.client.complete_json(
+                    ANOMALY_SYSTEM, to_payload(payload), AnomalyDecision, agent="analyst", purpose="anomaly",
+                    step=step, mock=heuristic_anomaly, prompt_version=PROMPT_VERSION,
+                )
+            except NotAvailable:
+                pass
+            else:
+                call = self.client.calls[-1]
+                return AnomalyHandling(
+                    action=decision.action, decided_by="analyst", reason=decision.reason,
+                    source="llm" if call.provider == "litellm" else "mock", model=call.model, llm_call_id=call.id,
+                )
+        rule = AnomalyDecision.model_validate(heuristic_anomaly(payload))
+        return AnomalyHandling(action=rule.action, decided_by="analyst", reason=rule.reason, source="heuristic")
 
     def _evaluate(self, spec: CandidateModelSpec, analysis: AnalysisResult, x: Sequence[float], y: Sequence[float],
                   step: int, call_id: int) -> CandidateEvaluation:

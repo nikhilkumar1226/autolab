@@ -66,7 +66,8 @@ def test_measurements_carry_spec_units_and_no_ground_truth():
     rig.move_actuator(10.0)
     m = rig.read_sensor()
     assert (m.units_actuator, m.units_sensor) == ("mg/L", "lux")
-    assert m.metadata == {"simulation": True}
+    assert set(m.metadata) == {"simulation", "cycle", "position_feedback"}
+    assert m.metadata["position_feedback"] == 10.0 and m.metadata["cycle"] == 1
     assert "experiment" not in rig.get_status().telemetry
 
 def test_data_source_labels():

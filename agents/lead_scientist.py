@@ -106,6 +106,7 @@ class PlanningState:
     disagreement: Optional[Disagreement]
     budget_left: int
     recent_rejections: List[Dict[str, Any]] = field(default_factory=list)
+    recent_anomalies: List[Dict[str, Any]] = field(default_factory=list)
     observation: Optional[Dict[str, Any]] = None
 
 
@@ -139,6 +140,8 @@ def strategy_payload(s: PlanningState) -> Dict[str, Any]:
         },
         "recent_rejections": s.recent_rejections[-3:],
     }
+    if s.recent_anomalies:
+        payload["recent_flagged_readings"] = s.recent_anomalies[-3:]
     if s.observation is not None:
         payload["observation"] = s.observation
     return payload
