@@ -4,11 +4,14 @@ LLM client: the single entry point, complete_json, through which every agent ask
 Providers (LLMConfig.provider, env LLM_PROVIDER):
 - "litellm": a real model through litellm. The chain is LLM_MODEL then LLM_FALLBACKS.
   Each model gets JSON-schema (or JSON) mode and a timeout. An invalid answer is re-asked
-  up to max_json_retries times with the validation error fed back. HTTP 429 is retried with
-  jittered exponential backoff. On auth errors, "credit balance too low", rate limits,
+  up to max_json_retries times with the validation error fed back; so is a provider that
+  rejects its own output in JSON mode (Groq's "json_validate_failed"). HTTP 429 is retried
+  with jittered exponential backoff. On auth errors, "credit balance too low", rate limits,
   timeouts, 5xx, connection errors, unknown models or persistently invalid JSON the next
   model is tried. If every model fails, LLMUnavailableError is raised: a real run never
   falls back to the mock. Validated answers are cached on disk.
+  Free tiers: network requests can be paced (min_request_interval_s), and a model that is
+  still rate-limited after its retries is skipped for rate_limit_cooldown_s, in this process.
 - "mock": deterministic and offline. The calling agent supplies the policy; it receives the
   same JSON payload the real model would see, and its answer goes through the same
   validation as a real one.
@@ -54,6 +57,23 @@ class LLMUnavailableError(RuntimeError):
     def __init__(self, message: str, call: Optional[LLMCallRecord] = None):
         super().__init__(message)
         self.call = call
+
+
+# Process-wide state for free-tier pacing: shared by every client in the process (the benchmark
+# makes one client per run). reset_pacing() clears it (tests).
+_PACING = {"last_request": None}
+_COOLDOWN: Dict[str, float] = {}
+
+
+def reset_pacing() -> None:
+    _PACING["last_request"] = None
+    _COOLDOWN.clear()
+
+
+def provider_rejected_json(exc: Exception) -> bool:
+    """A provider that checks JSON mode itself and refused the model's output (e.g. Groq's json_validate_failed)."""
+    text = str(exc).lower()
+    return "json_validate_failed" in text or "failed to validate json" in text
 
 
 _SECRET = re.compile(r"(sk-[A-Za-z0-9_\-]{6,}|AIza[0-9A-Za-z_\-]{10,}|gsk_[A-Za-z0-9]{10,})")
@@ -284,6 +304,13 @@ class LLMClient:
                     model=model, outcome="missing_key", error=f"missing {', '.join(missing)}; no request sent",
                 ))
                 continue
+            until = _COOLDOWN.get(model)
+            if until is not None and time.monotonic() < until:
+                record.attempts.append(ModelAttempt(
+                    model=model, outcome="rate_limit",
+                    error=f"skipped: still rate-limited a moment ago (cooling off for {until - time.monotonic():.0f} s)",
+                ))
+                continue
             parsed = self._try_model(record, model, base, schema, schema_json)
             if parsed is not None:
                 if self._cache is not None:
@@ -309,6 +336,7 @@ class LLMClient:
         messages = list(base)
         rate_retries = json_retries = 0
         while True:
+            self._pace()
             t0 = time.perf_counter()
             try:
                 response = (self._completion or litellm.completion)(
@@ -320,6 +348,18 @@ class LLMClient:
                 latency = time.perf_counter() - t0
                 outcome = classify(exc)
                 error = redact(f"{type(exc).__name__}: {exc}")
+                if provider_rejected_json(exc):
+                    # The provider ran JSON mode itself and refused the output (often an empty generation).
+                    # Like any invalid answer: re-ask the same model, then move on.
+                    reason = "the provider rejected the model's output in JSON mode (json_validate_failed)"
+                    record.validation_errors.append(f"{model}: {reason}")
+                    record.attempts.append(ModelAttempt(model=model, outcome="invalid_json",
+                                                        error=f"{reason} | {error}", latency_s=latency))
+                    if json_retries < self.cfg.max_json_retries:
+                        json_retries += 1
+                        record.json_retries += 1
+                        continue
+                    return None
                 if outcome == "rate_limit" and rate_retries < self.cfg.rate_limit_retries:
                     delay = self._backoff(rate_retries, exc)
                     record.attempts.append(ModelAttempt(
@@ -330,6 +370,8 @@ class LLMClient:
                     continue
                 logger.warning("LLM %s failed for %s/%s: %s", model, record.agent, record.purpose, error)
                 record.attempts.append(ModelAttempt(model=model, outcome=outcome, error=error, latency_s=latency))
+                if outcome == "rate_limit" and self.cfg.rate_limit_cooldown_s > 0:
+                    _COOLDOWN[model] = time.monotonic() + self.cfg.rate_limit_cooldown_s
                 return None
             latency = time.perf_counter() - t0
             self._account(record, model, response)
@@ -358,6 +400,16 @@ class LLMClient:
             record.model, record.raw_response = model, raw
             record.parsed = parsed.model_dump(mode="json")
             return parsed
+
+    def _pace(self) -> None:
+        """Wait until min_request_interval_s has passed since the last network request in this process."""
+        gap = self.cfg.min_request_interval_s
+        last = _PACING["last_request"]
+        if gap > 0 and last is not None:
+            wait = last + gap - time.monotonic()
+            if wait > 0:
+                self._sleep(wait)
+        _PACING["last_request"] = time.monotonic()
 
     def _account(self, record: LLMCallRecord, model: str, response: Any) -> None:
         """Add a response's tokens and estimated cost (every answered request is billed)."""

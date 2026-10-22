@@ -27,7 +27,7 @@ SMALL_INTEGERS = set(range(11))
 def agent_view_used(record: RunRecord):
     """The experiment view the LLM agents were shown in this run."""
     view = record.experiment.agent_view
-    return view.blinded() if record.config.agent.blind else view
+    return view.for_agents(record.config.agent.blind, record.config.agent.describe_apparatus)
 
 
 def build_facts(record: RunRecord) -> Dict[str, Any]:

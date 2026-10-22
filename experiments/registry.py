@@ -40,6 +40,8 @@ class NoiseSettings(BaseModel):
 
 
 BLIND_DESCRIPTION = "An actuator sets a controlled variable x; a sensor reports a response y."
+HIDDEN_DESCRIPTION = ("An actuator sets the controlled variable; a sensor reports the response. "
+                      "No description of the apparatus is given.")
 
 
 class AgentExperimentView(BaseModel):
@@ -50,6 +52,16 @@ class AgentExperimentView(BaseModel):
     independent: VariableSpec
     dependent: VariableSpec
     safe_bounds: Tuple[float, float]
+
+    def without_description(self) -> "AgentExperimentView":
+        """Variable names, units and bounds only: no description of the apparatus."""
+        return self.model_copy(update={"description": HIDDEN_DESCRIPTION})
+
+    def for_agents(self, blind: bool, describe_apparatus: bool) -> "AgentExperimentView":
+        """The view the LLM agents get under the run's settings (blind mode also hides the names)."""
+        if blind:
+            return self.blinded()
+        return self if describe_apparatus else self.without_description()
 
     def blinded(self) -> "AgentExperimentView":
         """Blind mode: no apparatus text and anonymous variable names. Units and bounds stay."""

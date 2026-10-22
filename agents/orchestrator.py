@@ -181,9 +181,7 @@ class DiscoveryEngine:
         Executes one seeded closed-loop experiment and returns its run record.
         """
         cfg = self.config
-        view = self.spec.agent_view()
-        if cfg.agent.blind:
-            view = view.blinded()
+        view = self.spec.agent_view().for_agents(cfg.agent.blind, cfg.agent.describe_apparatus)
         question = question or default_question(view)
         seed = cfg.seed if cfg.seed is not None else secrets.randbits(32)
 

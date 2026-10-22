@@ -107,7 +107,9 @@ def agents_line(record: RunRecord) -> str:
     """Which agents took part, for the report header."""
     provider, usage = record.config.llm.provider, record.llm_usage
     blind = " Blind mode: variable names and the apparatus description were hidden from the agents." \
-        if record.config.agent.blind else ""
+        if record.config.agent.blind else (
+        " Apparatus hidden: the agents got the variable names and units but no description of the apparatus."
+        if not record.config.agent.describe_apparatus else "")
     if provider == "none":
         return "Agents: no LLM (provider none; heuristic Planner, GP sampling)." + blind
     if provider == "mock":
