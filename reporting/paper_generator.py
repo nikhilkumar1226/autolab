@@ -28,8 +28,15 @@ def _tex_escape(text: str) -> str:
     return text
 
 def _sampler_text(record: RunRecord) -> str:
-    if record.config.agent.sampler == "random":
+    sampler = record.config.agent.sampler
+    if sampler == "random":
         return "uniform random sampling within the safe bounds (baseline)"
+    if sampler == "grid":
+        return "a grid refined coarse to fine: ends, middle, quarters, eighths (baseline)"
+    if sampler == "llm":
+        who = "the Planner agent" if record.config.llm.provider != "none" else "a rule (no LLM)"
+        return (f"{who} chose every point itself, with no Gaussian process; the rule fallback is the middle of the "
+                "widest unmeasured gap, or where the two best models disagree most")
     gp = "Gaussian-process uncertainty sampling (next point = maximum predictive standard deviation)"
     if record.config.llm.provider == "none":
         return gp

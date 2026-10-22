@@ -29,11 +29,12 @@ from agents.models import (
     GPSuggestion,
     Hypothesis,
     PlannerOutput,
+    PointChoice,
     StopRationale,
     StrategyDecision,
     TextSource,
 )
-from agents.prompts import PLANNER_SYSTEM, PROMPT_VERSION, STOP_SYSTEM, STRATEGY_SYSTEM, to_payload
+from agents.prompts import LLM_ONLY_SYSTEM, PLANNER_SYSTEM, PROMPT_VERSION, STOP_SYSTEM, STRATEGY_SYSTEM, to_payload
 from analysis.diagnostics import Disagreement
 from analysis.model_library import AnalysisResult
 from analysis.stopping import StopDecision
@@ -102,9 +103,10 @@ class PlanningState:
     y: Sequence[float]
     analysis: Optional[AnalysisResult]
     stop_check: Optional[StopDecision]
-    gp: GPSuggestion
+    gp: Optional[GPSuggestion]
     disagreement: Optional[Disagreement]
     budget_left: int
+    reachable: Optional[Tuple[float, float]] = None
     recent_rejections: List[Dict[str, Any]] = field(default_factory=list)
     recent_anomalies: List[Dict[str, Any]] = field(default_factory=list)
     observation: Optional[Dict[str, Any]] = None
@@ -133,7 +135,7 @@ def strategy_payload(s: PlanningState) -> Dict[str, Any]:
         "budget_left": s.budget_left,
         "fits": fits,
         "stopping_criteria_unmet": _unmet(s.stop_check),
-        "gp_suggestion": {"x": s.gp.position, "max_sigma": s.gp.max_sigma},
+        "gp_suggestion": None if s.gp is None else {"x": s.gp.position, "max_sigma": s.gp.max_sigma},
         "models_disagree_most_at": None if d is None else {
             "x": d.x, "best_predicts": d.best_prediction, "runner_up_predicts": d.runner_up_prediction,
             "difference_sigma": d.difference_sigma,
@@ -145,6 +147,32 @@ def strategy_payload(s: PlanningState) -> Dict[str, Any]:
     if s.observation is not None:
         payload["observation"] = s.observation
     return payload
+
+
+def choose_point_payload(s: PlanningState) -> Dict[str, Any]:
+    """LLM-only mode: the strategy payload without a GP suggestion, plus the reachable window."""
+    payload = strategy_payload(s)
+    del payload["gp_suggestion"]
+    payload["reachable"] = list(s.reachable) if s.reachable is not None else list(s.view.safe_bounds)
+    return payload
+
+
+def gap_point(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    The no-LLM rule for choosing a point (also the mock policy of LLM-only mode): where the two
+    best models disagree by at least 2 sigma, if that is reachable and new; otherwise the middle of
+    the widest unmeasured gap in the reachable range.
+    """
+    lo, hi = payload["reachable"]
+    xs = sorted(x for x, _ in payload["data"])
+    tol = (payload["safe_bounds"][1] - payload["safe_bounds"][0]) / 150.0
+    d = payload.get("models_disagree_most_at")
+    if (d is not None and d["difference_sigma"] >= 2.0 and lo <= d["x"] <= hi
+            and all(abs(d["x"] - x) > tol for x in xs)):
+        return {"position": d["x"], "reason": f"The two best models differ most here ({d['difference_sigma']:.1f} sigma)."}
+    edges = sorted({lo, hi, *(x for x in xs if lo <= x <= hi)})
+    width, middle = max((b - a, (a + b) / 2.0) for a, b in zip(edges, edges[1:])) if len(edges) > 1 else (0.0, lo)
+    return {"position": middle, "reason": f"Middle of the widest unmeasured gap ({width:.3g} wide)."}
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +200,11 @@ def mock_strategy(payload: Dict[str, Any]) -> Dict[str, Any]:
     if "observation" in payload:
         return {"choice": "gp", "reason": "Mock policy: the safety guard rejected the previous proposal, so the GP chooses."}
     return {"choice": "gp", "reason": "Mock policy: delegate to GP uncertainty sampling (the no-LLM baseline)."}
+
+
+def mock_choose_point(payload: Dict[str, Any]) -> Dict[str, Any]:
+    out = gap_point(payload)
+    return {"position": out["position"], "reason": "Mock policy: " + out["reason"]}
 
 
 def mock_stop(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -251,6 +284,11 @@ class LeadScientistAgent:
                     purpose: str = "strategy") -> Optional[Tuple[StrategyDecision, LLMCallRecord]]:
         """GP or own point, with a reason. None means no LLM: the caller uses the GP (Phase 1 behaviour)."""
         return self._ask(STRATEGY_SYSTEM, strategy_payload(state), StrategyDecision, purpose, mock_strategy, step=step)
+
+    def choose_point(self, state: PlanningState, step: int,
+                     purpose: str = "choose_point") -> Optional[Tuple[PointChoice, LLMCallRecord]]:
+        """LLM-only mode: the Planner's own next point. None means no LLM: the caller uses gap_point."""
+        return self._ask(LLM_ONLY_SYSTEM, choose_point_payload(state), PointChoice, purpose, mock_choose_point, step=step)
 
     # --- stop rationale ----------------------------------------------------------
     def explain_stop(self, decision: StopDecision, best_model: Optional[str]) -> Optional[AgentText]:

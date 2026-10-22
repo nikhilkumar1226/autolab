@@ -96,9 +96,10 @@ def parse_args(argv: Optional[List[str]] = None):
     )
     parser.add_argument(
         "--sampler",
-        choices=["gp", "random"],
+        choices=["gp", "random", "grid", "llm"],
         default="gp",
-        help="How to choose points after the initial design (default: gp uncertainty sampling)"
+        help="How to choose points after the initial design: gp (GP uncertainty sampling; the Planner may choose its "
+             "own point), random, grid (baselines), llm (the Planner chooses every point, no GP). Default: gp"
     )
     parser.add_argument(
         "--nonideal",

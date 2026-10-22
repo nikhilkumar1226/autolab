@@ -51,7 +51,8 @@ python main.py --experiment diode_iv --faults default --nonideal   # digital twi
 python -m scripts.twin_sweep                            # seeded fault/non-ideality sweep -> results/
 python -m safety.redteam                                # red-team suite -> results/redteam.csv (0 unsafe commands)
 streamlit run app/Home.py                               # dashboard (after Phase 7)
-python -m benchmark.run --quick                         # benchmark (after Phase 5)
+python -m benchmark.run --quick                         # benchmark smoke test, about 2 min -> results/quick/
+python -m benchmark.run --full --provider mock          # full benchmark (LLM rows mock) -> results/
 ```
 
 ## Conventions

@@ -39,8 +39,9 @@ logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 4
 
-# planner = a position the Planner chose itself (Phase 2); remeasure = the same position again after an anomaly (Phase 3)
-StepSource = Literal["initial_design", "gp", "random", "planner", "remeasure"]
+# planner = a position the Planner chose itself (Phase 2); remeasure = the same position again after an anomaly
+# (Phase 3); grid = the coarse-to-fine grid baseline, heuristic = the no-LLM rule of LLM-only mode (Phase 5)
+StepSource = Literal["initial_design", "gp", "random", "planner", "remeasure", "grid", "heuristic"]
 
 
 class ExperimentSnapshot(BaseModel):

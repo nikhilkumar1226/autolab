@@ -45,7 +45,7 @@ from hardware.simulator import PhysicsSimulationRig
 from hardware.serial_driver import SerialHardwareRig
 from hardware.safety_guard import EmergencyStopActive, HardwareSafetyGuard, SafetyLimits, _finite_real
 from optimization.bayesian_opt import ActiveLearningEngine
-from optimization.baselines import RandomSampler
+from optimization.baselines import GridSampler, RandomSampler
 from agents.models import AgentText, AnomalyHandling, Discussion, GPSuggestion
 from agents.events import (
     AnalysisCompleted,
@@ -62,7 +62,7 @@ from agents.events import (
     SafetyRejected,
     StrategyDecided,
 )
-from agents.lead_scientist import LeadScientistAgent, PlanningState, default_question
+from agents.lead_scientist import LeadScientistAgent, PlanningState, choose_point_payload, default_question, gap_point
 from agents.executor import HardwareExecutorAgent
 from agents.analyst import DataAnalystAgent
 from agents.tools import LabTools
@@ -113,6 +113,7 @@ class _Run:
     tools: LabTools
     executor: HardwareExecutorAgent
     random_sampler: RandomSampler
+    grid_sampler: GridSampler
     client: LLMClient
     planner: LeadScientistAgent
     analyst: DataAnalystAgent
@@ -231,6 +232,7 @@ class DiscoveryEngine:
             tools=tools,
             executor=HardwareExecutorAgent(tools),
             random_sampler=RandomSampler(lo, hi, np.random.default_rng(sampler_seq)),
+            grid_sampler=GridSampler(lo, hi),
             client=client,
             planner=LeadScientistAgent(client),
             analyst=DataAnalystAgent(
@@ -353,7 +355,7 @@ class DiscoveryEngine:
             if run.has_llm and reproposals < max_reproposals:
                 next_by = "planner"
             elif run.has_llm and not gp_fallback_used:
-                next_by = "gp"
+                next_by = "gp"  # in LLM-only mode: the no-LLM rule instead (there is no GP)
             else:
                 next_by = None
             run.events.emit(
@@ -367,7 +369,13 @@ class DiscoveryEngine:
             index = len(run.record.steps) + 1
             if next_by == "planner":
                 reproposals += 1
-                proposal = self._planner_proposal(run, index, observation)
+                proposal = (self._llm_only_proposal(run, index, observation) if self.config.agent.sampler == "llm"
+                            else self._planner_proposal(run, index, observation))
+            elif self.config.agent.sampler == "llm":
+                gp_fallback_used = True
+                rule = gap_point(choose_point_payload(self._planning_state(run, None, None)))
+                proposal = _Proposal(rule["position"], "heuristic",
+                                     rationale=f"rule fallback after {max_reproposals} rejected re-proposal(s): {rule['reason']}")
             else:
                 gp_fallback_used = True
                 suggestion = self._gp_suggestion(run, index)
@@ -450,9 +458,31 @@ class DiscoveryEngine:
             h = run.record.hypothesis
             ids = [h.llm_call_id] if h is not None and h.llm_call_id is not None else []
             return _Proposal(queue.popleft(), "initial_design", llm_call_ids=ids)
-        if self.config.agent.sampler == "random":
-            return _Proposal(run.random_sampler.suggest(), "random")
+        sampler, tools = self.config.agent.sampler, run.tools
+        if sampler == "random":
+            return _Proposal(run.random_sampler.suggest(tools.reachable_window()), "random")
+        if sampler == "grid":
+            position = run.grid_sampler.suggest(
+                tools.history_x, tools.reachable_window(), exclude=[*tools.rejected_positions, *tools.discarded_positions],
+            )
+            return _Proposal(position, "grid")
+        if sampler == "llm":
+            return self._llm_only_proposal(run, index, observation=None)
         return self._planner_proposal(run, index, observation=None)
+
+    def _llm_only_proposal(self, run: _Run, index: int, observation: Optional[Dict[str, Any]]) -> _Proposal:
+        """LLM-only mode: the Planner chooses the point itself, with no GP. Without an LLM: the gap rule."""
+        state = self._planning_state(run, None, observation)
+        decided = run.planner.choose_point(state, step=index, purpose="choose_point" if observation is None else "repropose")
+        if decided is None:
+            rule = gap_point(choose_point_payload(state))
+            return _Proposal(rule["position"], "heuristic", rationale=rule["reason"])
+        decision, call = decided
+        run.events.emit(
+            StrategyDecided, step=index, choice="self", position=decision.position, reason=decision.reason,
+            gp_position=None, observation=observation, model=call.model,
+        )
+        return _Proposal(decision.position, "planner", None, decision.reason, [call.id])
 
     def _planner_proposal(self, run: _Run, index: int, observation: Optional[Dict[str, Any]]) -> _Proposal:
         """The GP suggests; the Planner keeps it or picks its own point. Without an LLM the GP decides."""
@@ -472,7 +502,8 @@ class DiscoveryEngine:
         )
         return _Proposal(position, "planner" if own else "gp", suggestion, decision.reason, [call.id])
 
-    def _planning_state(self, run: _Run, suggestion: GPSuggestion, observation: Optional[Dict[str, Any]]) -> PlanningState:
+    def _planning_state(self, run: _Run, suggestion: Optional[GPSuggestion],
+                        observation: Optional[Dict[str, Any]]) -> PlanningState:
         tools, analysis = run.tools, run.analysis
         disagreement = None
         if analysis is not None and analysis.best is not None and analysis.runner_up is not None:
@@ -489,6 +520,7 @@ class DiscoveryEngine:
             gp=suggestion,
             disagreement=disagreement,
             budget_left=self.config.stopping.max_measurements - len(tools.history_x),
+            reachable=tools.reachable_window(),
             recent_rejections=[r for r in run.rejections if r is not observation][-3:],
             recent_anomalies=run.anomalies[-3:],
             observation=observation,

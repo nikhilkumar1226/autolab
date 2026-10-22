@@ -95,7 +95,7 @@ class StrategyDecided(_EventBase):
     choice: Literal["gp", "self"]
     position: float = Field(description="The position that will be requested")
     reason: str
-    gp_position: float
+    gp_position: Optional[float] = Field(default=None, description="The GP's suggestion; None in LLM-only mode")
     observation: Optional[Dict[str, Any]] = Field(default=None, description="The safety rejection being answered, if any")
     model: Optional[str] = None
 

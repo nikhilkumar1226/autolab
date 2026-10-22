@@ -60,6 +60,11 @@ class StrategyDecision(BaseModel):
             self.position = None  # the GP's point is used; a stray number is ignored
         return self
 
+class PointChoice(BaseModel):
+    """LLM-only mode: the Planner's own next position (there is no GP to delegate to)."""
+    position: Number
+    reason: str = Field(min_length=1, max_length=600)
+
 class AnalystReport(BaseModel):
     interpretation: str = Field(min_length=1, max_length=1200)
     residuals_suggest_missing_model: bool
