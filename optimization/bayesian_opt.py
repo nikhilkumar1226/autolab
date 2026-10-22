@@ -43,6 +43,7 @@ class ActiveLearningEngine:
             random_state=random_state
         )
         self.is_fitted = False
+        self.fitted_n = 0  # number of points of the last fit
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> None:
         """
@@ -55,6 +56,7 @@ class ActiveLearningEngine:
             warnings.simplefilter("ignore", ConvergenceWarning)
             self.gp.fit(X, y)
         self.is_fitted = True
+        self.fitted_n = len(X)
 
     def predict(self, X_grid: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -77,12 +79,16 @@ class ActiveLearningEngine:
         strategy: AcquisitionStrategy = AcquisitionStrategy.UNCERTAINTY,
         kappa: float = 1.96,
         xi: float = 0.01,
-        exclude: Optional[Sequence[float]] = None
+        exclude: Optional[Sequence[float]] = None,
+        upper: Optional[float] = None,
+        reachable: Optional[Tuple[float, float]] = None,
     ) -> Dict[str, Any]:
         """
         Computes acquisition function over candidate search space and returns optimal next coordinate.
         Candidates close to an already measured point, or to a point in `exclude`
-        (e.g. one the safety guard rejected), are never proposed.
+        (e.g. one the safety guard rejected), are never proposed, nor any at or above `upper`
+        (the safety guard's ceiling after a response-limit trip), nor outside `reachable` (the
+        positions within the guard's step limit of the current one).
         """
         if len(X_observed.shape) == 1:
             X_observed = X_observed.reshape(-1, 1)
@@ -103,6 +109,10 @@ class ActiveLearningEngine:
                 axis=1
             )
             mask_novelty &= distances_to_excluded > min_distance_threshold
+        if upper is not None:
+            mask_novelty &= self.candidate_grid[:, 0] < upper
+        if reachable is not None:
+            mask_novelty &= (self.candidate_grid[:, 0] >= reachable[0]) & (self.candidate_grid[:, 0] <= reachable[1])
 
         if strategy == AcquisitionStrategy.UNCERTAINTY:
             # Maximum predictive variance / standard deviation

@@ -8,7 +8,7 @@ An autonomous "Self-Driving Laboratory" (SDL) pairing physical hardware (or Digi
 ## 🌟 Key Features
 
 1. **Digital Twin Simulation Layer**: Full physics and noise modeling (Malus's Law, Inverse Square Law, Beer-Lambert Law) allowing **100% development and verification without physical hardware**.
-2. **Seamless Hardware Transition**: Ready-to-flash Arduino/ESP32 C++ firmware (`firmware/arduino_rig.ino`). Simply toggle `simulate: False` to run on real hardware via PySerial.
+2. **Seamless Hardware Transition**: Arduino Uno firmware (`firmware/arduino_rig/arduino_rig.ino`: SG90 servo on pin 9; LDR, TSL2591 or emulated sensor). Run on the board or in the Wokwi simulator with `--hardware` (see `docs/wokwi.md`).
 3. **Nervous System (Safety Layer)**: Hardcoded boundary checking, angular velocity clamping, and Emergency Stop (`ESTOP`) interceptors preventing hardware damage from AI hallucinations.
 4. **Bayesian Optimization & Active Learning**: Gaussian Process regression with epistemic uncertainty sampling ($\arg\max \sigma(x)$) and Expected Improvement (EI) for sample efficiency.
 5. **Multi-Agent Architecture**:
@@ -42,7 +42,7 @@ AI-Laboratory/
 │   ├── visualizer.py          # Publication-grade 3-panel matplotlib figures
 │   └── paper_generator.py     # Markdown and LaTeX research paper synthesis
 ├── firmware/
-│   └── arduino_rig.ino        # Ready-to-flash C++ firmware for Arduino/ESP32
+│   └── arduino_rig/arduino_rig.ino  # Arduino Uno firmware (servo + LDR / TSL2591 / emulated sensor)
 ├── tests/                     # Unit and integration test suite
 ├── main.py                    # Main discovery CLI entrypoint
 ├── requirements.txt           # Python dependencies
@@ -86,7 +86,7 @@ Every run automatically produces:
 ## 🔌 Transitioning to Physical Hardware
 
 When your Arduino / ESP32 and motor/sensor hardware arrive:
-1. Open the Arduino IDE, open `firmware/arduino_rig.ino`, and flash it to your microcontroller.
+1. Build and upload the firmware (`scripts/build_firmware.sh LDR`, then `arduino-cli upload`; see `docs/wokwi.md`).
 2. Connect the microcontroller via USB.
 3. Run the discovery loop with the `--hardware` flag:
    ```bash

@@ -3,7 +3,9 @@ Evidence-based stopping rule.
 
 A run converges when ALL of these hold for the best model (by BIC):
 1. it beats the runner-up by delta-BIC >= threshold (default 6, "strong" evidence
-   on the Kass & Raftery 1995 scale);
+   on the Kass & Raftery 1995 scale). Fits marked redundant by analysis/parsimony.py
+   (more parameters, same curve as a simpler model) are not rivals; if every other fit is
+   redundant, this criterion passes;
 2. every parameter's relative standard error is below max_rel_se (default 5%),
    using the kind-normalised relative SE from analysis.model_library;
 3. at least min_points measurements exist;
@@ -28,7 +30,8 @@ from typing import Optional, Sequence
 import numpy as np
 from pydantic import BaseModel, Field
 
-from analysis.model_library import MODEL_LIBRARY, AnalysisResult, ModelFit
+from analysis.candidate_models import predict_fit
+from analysis.model_library import AnalysisResult, ModelFit
 from config import StoppingConfig
 
 
@@ -78,11 +81,10 @@ class StopDecision(BaseModel):
 
 
 def _predict_at(fit: ModelFit, x: float) -> Optional[float]:
-    model = MODEL_LIBRARY.get(fit.key)
-    if model is None:
+    predicted = predict_fit(fit, [x])
+    if predicted is None:
         return None
-    with np.errstate(all="ignore"):
-        value = float(model.predict([x], fit.params)[0])
+    value = float(predicted[0])
     return value if math.isfinite(value) else None
 
 
@@ -130,7 +132,8 @@ def _stable_best_check(
     streak = 0
     for a in reversed(analyses):
         dbic = a.delta_bic_runner_up
-        if a.best is None or a.best.key != best.key or dbic is None or dbic < cfg.delta_bic_threshold:
+        decisive = a.only_redundant_rivals or (dbic is not None and dbic >= cfg.delta_bic_threshold)
+        if a.best is None or a.best.key != best.key or not decisive:
             break
         streak += 1
     return CriterionCheck(
@@ -183,12 +186,18 @@ def evaluate_stopping(
     best = analysis.best if analysis is not None else None
 
     dbic = analysis.delta_bic_runner_up if analysis is not None else None
-    delta_bic = CriterionCheck(
-        value=dbic,
-        threshold=cfg.delta_bic_threshold,
-        passed=dbic is not None and dbic >= cfg.delta_bic_threshold,
-        detail="" if dbic is not None else "fewer than two models fitted",
-    )
+    if analysis is not None and analysis.only_redundant_rivals:
+        delta_bic = CriterionCheck(
+            value=None, threshold=cfg.delta_bic_threshold, passed=True,
+            detail="no distinct rival: every other model reproduces the best fit's curve with more parameters (parsimony)",
+        )
+    else:
+        delta_bic = CriterionCheck(
+            value=dbic,
+            threshold=cfg.delta_bic_threshold,
+            passed=dbic is not None and dbic >= cfg.delta_bic_threshold,
+            detail="" if dbic is not None else "fewer than two models fitted",
+        )
 
     if best is None:
         rel_se = CriterionCheck(value=None, threshold=cfg.max_rel_se, passed=False, detail="no model fitted")
@@ -230,9 +239,10 @@ def evaluate_stopping(
         reason, message = override, f"stopped: {override.value}"
     elif converged:
         reason = StopReason.CONVERGED
+        evidence = (f"beats the runner-up by delta-BIC {dbic:.1f} (>= {cfg.delta_bic_threshold:g})" if dbic is not None
+                    else "has no distinct rival (the other models only reproduce it with more parameters)")
         message = (
-            f"converged: {best.name} beats the runner-up by delta-BIC {dbic:.1f} "
-            f"(>= {cfg.delta_bic_threshold:g}), max relative SE {rel_se.value:.2%} "
+            f"converged: {best.name} {evidence}, max relative SE {rel_se.value:.2%} "
             f"(< {cfg.max_rel_se:.0%}), n = {n_measurements}"
         )
         if cfg.predictive_stability:

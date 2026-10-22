@@ -10,20 +10,29 @@ from rich.table import Table
 
 from agents.events import (
     AnalysisCompleted,
+    AnomalyDetected,
     EngineEvent,
     GPUpdated,
     HypothesisProposed,
+    LLMCalled,
     MeasurementTaken,
     ReportReady,
     RunStarted,
     RunStopped,
     SafetyRejected,
+    StrategyDecided,
 )
 from analysis.stopping import CriterionCheck
 
 
 def _mark(check: CriterionCheck) -> str:
     return "[green]✓[/green]" if check.passed else "[red]✗[/red]"
+
+
+def _by(source: str, model: Optional[str]) -> str:
+    return {"llm": model or "LLM", "mock": "mock", "heuristic": "heuristic", "unavailable": "not generated"}.get(source, source)
+
+INDENT = "           "
 
 
 class ConsoleEventPrinter:
@@ -47,16 +56,23 @@ class ConsoleEventPrinter:
             f"[yellow]Experiment:[/yellow] {escape(e.experiment)}   [dim](operator view; agents are not told this)[/dim]\n"
             f"[yellow]Question:[/yellow] {escape(e.question)}\n"
             f"[yellow]Seed:[/yellow] {e.seed}   [yellow]Budget:[/yellow] {e.budget} measurements   "
-            f"[yellow]Sampler:[/yellow] {e.sampler}",
+            f"[yellow]Sampler:[/yellow] {e.sampler}\n"
+            + (f"[yellow]Digital twin:[/yellow] {escape(e.twin)}\n" if e.twin else "")
+            + f"[yellow]Agents:[/yellow] {escape(e.llm)}"
+            + ("   [yellow]Blind mode:[/yellow] on (names and apparatus hidden from the agents)" if e.blind else ""),
             border_style="cyan",
         ))
 
     def _on_hypothesis(self, e: HypothesisProposed) -> None:
         h = e.hypothesis
         self.console.print("\n[bold green]=== Hypothesis and initial design ===[/bold green]")
-        self.console.print(f"[bold]Hypothesis:[/bold] {escape(h.statement)}")
+        self.console.print(f"[bold]Hypothesis[/bold] ({escape(_by(h.source, h.model))}): {escape(h.statement)}")
         self.console.print(f"[bold]Relationship:[/bold] {escape(h.target_relationship)}")
+        if h.range_clipped:
+            self.console.print(f"[bold yellow]CLIPPED:[/bold yellow] {escape(h.range_note)} (the safety limits are unchanged)")
         self.console.print(f"[bold]Initial design:[/bold] {', '.join(f'{p:g}' for p in e.initial_design)}")
+        if h.design_rationale:
+            self.console.print(f"[bold]Rationale:[/bold] {escape(h.design_rationale)}")
         self.console.print("\n[bold green]=== Measure, analyse, decide ===[/bold green]")
 
     def _on_measurement(self, e: MeasurementTaken) -> None:
@@ -67,8 +83,37 @@ class ConsoleEventPrinter:
         )
 
     def _on_safety_rejection(self, e: SafetyRejected) -> None:
+        then = {"planner": " -> fed back to the Planner", "gp": " -> GP fallback"}.get(e.fed_back_to or "", "")
         self.console.print(
-            f"[bold red]{escape(f'[step {e.step:02d}]')} SAFETY REJECTION[/bold red] ({e.source}): {escape(e.reason)}"
+            f"[bold red]{escape(f'[step {e.step:02d}]')} SAFETY REJECTION[/bold red] ({e.source}): {escape(e.reason)}{then}"
+        )
+
+    def _on_anomaly(self, e: AnomalyDetected) -> None:
+        h = e.handling
+        value = "no reading" if e.value is None else f"y = {e.value:.4g} {self._units_y}"
+        who = h.decided_by if h.decided_by != "analyst" else f"analyst ({_by(h.source or 'heuristic', h.model)})"
+        self.console.print(
+            f"[bold yellow]{escape(f'[step {e.step:02d}]')} FLAGGED[/bold yellow] ({', '.join(e.flags)}) at "
+            f"x = {e.position:.4g} {self._units_x}, {value} -> {h.action} {escape(f'[{who}]')}: {escape(h.reason)}"
+        )
+
+    def _on_strategy(self, e: StrategyDecided) -> None:
+        what = "GP" if e.choice == "gp" else "own point"
+        self.console.print(
+            f"{INDENT}[magenta]planner:[/magenta] {what}, x = {e.position:.2f} {self._units_x}  {escape(e.reason)}"
+        )
+
+    def _on_llm_call(self, e: LLMCalled) -> None:
+        if not e.ok:
+            self.console.print(f"{INDENT}[bold red]LLM {e.agent}/{e.purpose} failed:[/bold red] {escape(e.error or '')}")
+            return
+        if e.provider != "litellm":
+            return  # mock calls cost nothing; the reasoning lines already show them
+        cost = "cost n/a" if e.cost_usd is None else f"${e.cost_usd:.5f}"
+        cached = ", cached" if e.cached else ""
+        self.console.print(
+            f"{INDENT}[dim]llm {e.agent}/{e.purpose}: {escape(e.model or '')}, {e.input_tokens}->{e.output_tokens} tok, "
+            f"{cost}, {e.latency_s:.1f} s{cached}[/dim]"
         )
 
     def _on_gp_update(self, e: GPUpdated) -> None:
@@ -98,12 +143,27 @@ class ConsoleEventPrinter:
             z = f"{c.prediction.value:.1f}σ" if c.prediction.value is not None else "n/a"
             line += f" | new point {z} (≤{c.prediction.threshold:g}σ) {_mark(c.prediction)}"
         self.console.print(line)
+        r = e.review
+        if r is not None:
+            self.console.print(f"{INDENT}[blue]analyst ({escape(_by(r.source, r.model))}):[/blue] {escape(r.interpretation)}")
+            if r.candidate is not None:
+                cand = r.candidate
+                colour = "green" if cand.status == "accepted" else "yellow"
+                self.console.print(
+                    f"{INDENT}[{colour}]candidate model {cand.status}:[/{colour}] "
+                    f"{escape(cand.spec.expression)}  ({escape(cand.reason)})"
+                )
 
     def _on_stopped(self, e: RunStopped) -> None:
         d = e.decision
         reason = d.reason.value if d.reason else "unknown"
         colour = "green" if reason == "converged" else "yellow"
         self.console.print(f"\n[bold {colour}]STOPPED ({reason}):[/bold {colour}] {escape(d.message)}")
+        r = e.rationale
+        if r is not None and r.source == "unavailable":
+            self.console.print(f"[bold red]{escape(r.text)}[/bold red]")
+        elif r is not None:
+            self.console.print(f"[bold]Planner's explanation[/bold] ({escape(_by(r.source, r.model))}): {escape(r.text)}")
 
         analysis = e.result.final_analysis if e.result else None
         table = Table(title="Blind model comparison (final)", show_lines=False)
@@ -114,7 +174,8 @@ class ConsoleEventPrinter:
         table.add_column("R²", justify="right")
         if analysis is not None:
             for rank, f in enumerate(analysis.fits, 1):
-                table.add_row(str(rank), f.name, f"{f.bic:.2f}", f"{f.delta_bic:.2f}", f"{f.r2:.4f}")
+                name = f.name if f.redundant is None else f"[dim]{escape(f.name)} (not counted: parsimony)[/dim]"
+                table.add_row(str(rank), name, f"{f.bic:.2f}", f"{f.delta_bic:.2f}", f"{f.r2:.4f}")
             for s in analysis.skipped:
                 table.add_row("-", f"[dim]{escape(s.name)}[/dim]", "[dim]skipped[/dim]", "", f"[dim]{escape(s.reason)}[/dim]")
         self.console.print(table)
@@ -135,6 +196,29 @@ class ConsoleEventPrinter:
 
     def _on_report_ready(self, e: ReportReady) -> None:
         a = e.artifacts
+        u = e.llm_usage
+        if u is not None and u.calls:
+            models = ", ".join(f"{m} x{k}" for m, k in u.calls_per_model.items())
+            cost = f"estimated ${u.cost_usd:.4f}" + (f" (+{u.cost_unknown_calls} unknown)" if u.cost_unknown_calls else "")
+            self.console.print(
+                f"\n[bold]LLM usage:[/bold] {u.calls} calls ({u.cached_calls} cached, {u.failed_calls} failed): {escape(models)}; "
+                f"{u.input_tokens} in / {u.output_tokens} out tokens; {cost}"
+            )
+        if e.faults:
+            table = Table(title="Injected faults and outliers (scored against the twin's fault log)")
+            for column in ("Fault", "Cycle", "Status", "Flags", "Then"):
+                table.add_column(column)
+            for f in e.faults:
+                colour = {"recovered": "green", "missed": "red", "detected_not_recovered": "red"}.get(f.status, "dim")
+                table.add_row(f.type + ("" if f.scheduled else " (random)"), str(f.at_cycle),
+                              f"[{colour}]{f.status}[/{colour}]", ", ".join(f.flags), f.resolution or "")
+            self.console.print(table)
+        s = e.fault_summary
+        if s is not None and s.unexplained:
+            flags = ", ".join(f"{k} x{v}" for k, v in s.unexplained.items())
+            self.console.print(f"[dim]Flagged readings with nothing injected (false alarms on the twin): {escape(flags)}[/dim]")
+        for warning in e.warnings:
+            self.console.print(f"[bold red]WARNING:[/bold red] {escape(warning)}")
         self.console.print("\n[bold green]=== Artifacts ===[/bold green]")
         for label, path in [("Run record", a.record), ("Figure", a.plot), ("Report (md)", a.report_md), ("Report (tex)", a.report_tex)]:
             if path:

@@ -203,11 +203,13 @@ column. Never let the LLM change safety bounds or the simulator's ground truth.
 When done, stop and summarise what you built; I will then run the Phase checkpoint.
 ```
 
+*Change after review (Oct 22): step 3 no longer uses `sympy.parse_expr`, which calls `eval` internally. Proposed expressions are parsed with `ast.parse(mode="eval")`, checked against a whitelist and evaluated by walking the tree with numpy (CLAUDE.md rule 2).*
+
 **Done when:**
-- [ ] `python -m llm.check` shows which keys work (Claude, Gemini).
-- [ ] `python main.py --provider mock` works with no key.
-- [ ] With a real key, `python main.py --provider litellm` works, and the run JSON shows the real prompts, responses, tokens and cost.
-- [ ] `--provider none` still works (this is your "no LLM" baseline).
+- [ ] `python -m llm.check` shows which keys work (Claude, Gemini). (Open: the tool works and reports every model, but `.env` still has the old layout and no keys. Copy the layout from `.env.example`, add the keys and rerun it. See docs/CHANGELOG.md.)
+- [x] `python main.py --provider mock` works with no key.
+- [ ] With a real key, `python main.py --provider litellm` works, and the run JSON shows the real prompts, responses, tokens and cost. (Open: needs a key. Without one, the run stops with a clear error and never falls back to mock; the litellm path is tested offline with a scripted fake.)
+- [x] `--provider none` still works (this is your "no LLM" baseline).
 
 ---
 
@@ -245,8 +247,13 @@ When done, stop and summarise what you built; I will then run the Phase checkpoi
 ```
 
 **Done when:**
-- [ ] All 6 experiments run with faults on and off.
-- [ ] The run JSON lists each injected fault and whether it was detected and recovered.
+- [x] All 6 experiments run with faults on and off. (All 8 registry experiments, from the CLI and as a test; see docs/CHANGELOG.md, Phase 3.)
+- [x] The run JSON lists each injected fault and whether it was detected and recovered. (`faults` and `fault_summary` in run-record schema 3.)
+
+*Changes from the prompt, decided during Phase 3 (reasons and numbers in docs/CHANGELOG.md):*
+- *Outliers are detected with the current best fit's prediction band (Student-t), not the GP band: the GP band gave 47 false alarms in 80 clean runs. The GP band stays available as an option.*
+- *The default fault schedule is spike 6, stuck 8, dropout 10–11, because in the example the stuck actuator at cycle 7 always falls on the spike's re-measurement.*
+- *Stefan–Boltzmann temperature is in kK, a parsimony rule lets a linear law converge, and a growing exponential covers the diode.*
 
 ---
 
@@ -278,8 +285,8 @@ When done, stop and summarise what you built; I will then run the Phase checkpoi
 ```
 
 **Done when:**
-- [ ] `results/redteam.csv` exists and the "reached rig" count is 0.
-- [ ] The property tests pass.
+- [x] `results/redteam.csv` exists and the "reached rig" count is 0. (59 cases; 0 unsafe commands reached the rig; summary in `results/redteam_summary.md`.)
+- [x] The property tests pass. (`tests/test_safety_properties.py`: 6 properties, 1,300 generated examples.)
 
 ---
 
@@ -313,8 +320,8 @@ When done, stop and summarise what you built; I will then run the Phase checkpoi
 ```
 
 **Done when:**
-- [ ] `--quick` runs in under a few minutes.
-- [ ] `--full` (with the real LLM) has run once and `results/` is filled.
+- [x] `--quick` runs in under a few minutes. (142 s for 464 runs on 7 workers.)
+- [ ] `--full` (with the real LLM) has run once and `results/` is filled. (Open: `results/` is filled from `--full --provider mock`. The baseline rows are final; the LLM rows are mock and labelled. Needs a key; see docs/HANDOFF.md.)
 - [ ] Send me `results/` and I'll check the numbers before they go into the report.
 
 ---
@@ -347,8 +354,8 @@ When done, stop and summarise what you built; I will then run the Phase checkpoi
 ```
 
 **Done when:**
-- [ ] The Wokwi simulation runs, and a full AutoLab run completes against it.
-- [ ] You have a screenshot of the Wokwi circuit; this becomes the circuit diagram in the black book.
+- [ ] The Wokwi simulation runs, and a full AutoLab run completes against it. (Open: needs the Wokwi extension and its licence, see docs/wokwi.md. Done so far: the firmware compiles in all three sensor variants, and a full run passes against a fake port that follows the firmware's protocol.)
+- [ ] You have a screenshot of the Wokwi circuit; this becomes the circuit diagram in the black book. (Open: needs the Wokwi extension.)
 
 ---
 
@@ -376,7 +383,7 @@ Phase checkpoint.
 ```
 
 **Done when:**
-- [ ] The dashboard runs locally, and a live run updates step by step.
+- [x] The dashboard runs locally, and a live run updates step by step. (Checked headless: `streamlit run app/Home.py` serves and its health check answers ok; a live run's snapshots arrive one measurement at a time; every page renders under Streamlit's AppTest; E-STOP aborts a run mid-way. Not yet looked at in a browser: see docs/HANDOFF.md.)
 
 ---
 

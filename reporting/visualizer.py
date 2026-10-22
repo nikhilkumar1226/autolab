@@ -10,7 +10,7 @@ import matplotlib
 matplotlib.use('Agg') # Non-interactive headless backend
 import matplotlib.pyplot as plt
 
-from analysis.model_library import MODEL_LIBRARY
+from analysis.candidate_models import model_for_fit
 from records.run_record import RunRecord
 
 class ScienceVisualizer:
@@ -42,7 +42,7 @@ class ScienceVisualizer:
 
         analysis = record.result.final_analysis if record.result else None
         best = analysis.best if analysis else None
-        model = MODEL_LIBRARY[best.key] if best else None
+        model = model_for_fit(best) if best else None
 
         fig = plt.figure(figsize=(15, 5), dpi=300)
         plt.style.use('seaborn-v0_8-whitegrid' if 'seaborn-v0_8-whitegrid' in plt.style.available else 'default')

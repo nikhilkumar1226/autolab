@@ -28,7 +28,7 @@ Data flow per iteration: Planner/Analyst propose a position (JSON) → SafetyGua
 ## Hard rules
 
 1. **The LLM never talks to hardware directly.** It only returns structured JSON (validated with Pydantic). Every position goes through `HardwareSafetyGuard`. A rejected command is fed back to the agent as an observation, never retried blindly.
-2. **Never `eval`/`exec` LLM output.** Model expressions proposed by an LLM are parsed with `sympy.parse_expr` using a whitelist of symbols and functions only.
+2. **Never `eval`/`exec` LLM output, and never pass it to `sympy.parse_expr` or `sympify`** (both call `eval` internally). Model expressions proposed by an LLM are parsed with `ast.parse(mode="eval")` and checked node by node against a whitelist: `x`, the declared parameter names, numbers, `pi`, `e`, `+ - * / **`, unary minus, and one-argument calls to `sin cos tan exp log sqrt abs radians`. Attributes, subscripts, strings, keywords, lambdas, `__`, undeclared names and anything over 200 characters are rejected. The validated tree is evaluated by walking it with numpy (`analysis/candidate_models.py`).
 3. **Secrets live only in `.env`** (local) or Streamlit secrets (cloud). Never hard-code or print API keys. `.env` is git-ignored.
 4. **Three LLM providers, selectable by `LLM_PROVIDER`:** `litellm` (real model: Claude `LLM_MODEL` first, then Gemini models in `LLM_FALLBACKS`; record which model answered; never fall back silently to mock in a real run), `mock` (deterministic, no network; used by all tests and the public demo), `none` (no LLM: heuristic fallback; used as the ablation baseline). Everything must run with `mock` and no API key.
 5. **API budget is tight** (paid Claude credit, small Gemini free quota): keep prompts compact, cache responses, back off on 429, never loop on retries.
@@ -47,8 +47,12 @@ pip install -r requirements.txt
 pytest -q                                               # all tests (mock LLM)
 python main.py --experiment malus_law                   # one run, CLI
 python main.py --experiment malus_law --provider mock   # no API key needed
+python main.py --experiment diode_iv --faults default --nonideal   # digital twin with faults and non-idealities
+python -m scripts.twin_sweep                            # seeded fault/non-ideality sweep -> results/
+python -m safety.redteam                                # red-team suite -> results/redteam.csv (0 unsafe commands)
 streamlit run app/Home.py                               # dashboard (after Phase 7)
-python -m benchmark.run --quick                         # benchmark (after Phase 5)
+python -m benchmark.run --quick                         # benchmark smoke test, about 2 min -> results/quick/
+python -m benchmark.run --full --provider mock          # full benchmark (LLM rows mock) -> results/
 ```
 
 ## Conventions

@@ -5,17 +5,24 @@ The engine calls `on_event(event)` for every event, in order. Consumers (the CLI
 console, the Phase 7 dashboard) render them; the engine never prints. The
 `experiment` name in run_started is for the operator display only: events are
 never fed to agents.
+
+Phase 2 adds `strategy` (the Planner's choice before a measurement, with its reason)
+and `llm_call` (one per LLM call: agent, purpose, model that answered, tokens, cost).
+Phase 3 adds `anomaly` (a reading the safety guard flagged, and what happens next).
+The full prompts and answers are in the run record, not in the events.
 """
 import logging
 from datetime import datetime, timezone
-from typing import Annotated, Callable, List, Literal, Optional, Union
+from typing import Annotated, Any, Callable, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
-from agents.models import GPCurve, GPSuggestion, Hypothesis
+from agents.models import AgentText, AnalystReview, AnomalyHandling, ExpectedBand, GPCurve, GPSuggestion, Hypothesis
 from analysis.model_library import AnalysisResult
 from analysis.stopping import StopDecision
 from hardware.base import DataSource
+from llm.types import LLMUsage
+from records.faults import FaultOutcome, FaultSummary
 from records.run_record import Artifacts, RunResult, StepSource
 
 logger = logging.getLogger(__name__)
@@ -35,6 +42,10 @@ class RunStarted(_EventBase):
     data_source: DataSource
     budget: int
     sampler: str
+    twin: str = Field(default="", description="Digital-twin settings (non-idealities, faults) for the operator display")
+    provider: str = "none"
+    llm: str = Field(default="", description="Provider and model chain, for display")
+    blind: bool = False
 
 
 class HypothesisProposed(_EventBase):
@@ -60,6 +71,50 @@ class SafetyRejected(_EventBase):
     source: StepSource
     requested_position: Optional[float]
     reason: str
+    attempt_in_slot: int = 1
+    fed_back_to: Optional[Literal["planner", "gp"]] = Field(
+        default=None, description="Who proposes next: the Planner (with this message as an observation) or the GP fallback"
+    )
+
+
+class AnomalyDetected(_EventBase):
+    """The safety guard flagged a reading; `handling` says what happens next and who decided."""
+    type: Literal["anomaly"] = "anomaly"
+    step: int
+    source: StepSource
+    position: float
+    value: Optional[float] = Field(description="None if the reading was not a number")
+    flags: List[str]
+    expected: List[ExpectedBand] = Field(default_factory=list)
+    handling: AnomalyHandling
+
+
+class StrategyDecided(_EventBase):
+    type: Literal["strategy"] = "strategy"
+    step: int
+    choice: Literal["gp", "self"]
+    position: float = Field(description="The position that will be requested")
+    reason: str
+    gp_position: Optional[float] = Field(default=None, description="The GP's suggestion; None in LLM-only mode")
+    observation: Optional[Dict[str, Any]] = Field(default=None, description="The safety rejection being answered, if any")
+    model: Optional[str] = None
+
+
+class LLMCalled(_EventBase):
+    type: Literal["llm_call"] = "llm_call"
+    call_id: int
+    agent: str
+    purpose: str
+    step: Optional[int] = None
+    provider: str
+    model: Optional[str] = Field(description="The model that answered; None if every model failed")
+    ok: bool
+    cached: bool
+    input_tokens: int
+    output_tokens: int
+    cost_usd: Optional[float]
+    latency_s: float
+    error: Optional[str] = None
 
 
 class AnalysisCompleted(_EventBase):
@@ -67,6 +122,7 @@ class AnalysisCompleted(_EventBase):
     step: int
     analysis: AnalysisResult
     stop_check: StopDecision
+    review: Optional[AnalystReview] = None
 
 
 class GPUpdated(_EventBase):
@@ -80,16 +136,21 @@ class RunStopped(_EventBase):
     type: Literal["stopped"] = "stopped"
     decision: StopDecision
     result: Optional[RunResult] = None
+    rationale: Optional[AgentText] = Field(default=None, description="The Planner's explanation; the decision is numerical")
 
 
 class ReportReady(_EventBase):
     type: Literal["report_ready"] = "report_ready"
     artifacts: Artifacts
+    llm_usage: Optional[LLMUsage] = None
+    warnings: List[str] = Field(default_factory=list)
+    faults: List[FaultOutcome] = Field(default_factory=list, description="Digital twin: what became of each injected fault")
+    fault_summary: Optional[FaultSummary] = None
 
 
 EngineEvent = Annotated[
-    Union[RunStarted, HypothesisProposed, MeasurementTaken, SafetyRejected,
-          AnalysisCompleted, GPUpdated, RunStopped, ReportReady],
+    Union[RunStarted, HypothesisProposed, MeasurementTaken, SafetyRejected, AnomalyDetected, StrategyDecided,
+          LLMCalled, AnalysisCompleted, GPUpdated, RunStopped, ReportReady],
     Field(discriminator="type"),
 ]
 

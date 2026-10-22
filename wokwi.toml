@@ -1,0 +1,9 @@
+# Wokwi firmware-in-the-loop for the AutoLab rig (see docs/wokwi.md).
+# The firmware is the SENSOR_EMULATED build (scripts/build_firmware.sh). Wokwi forwards the
+# simulated Arduino's serial port over RFC2217, so the unchanged Python driver connects with:
+#   python main.py --experiment malus_law --hardware --port rfc2217://localhost:4000 --provider mock
+[wokwi]
+version = 1
+firmware = "firmware/build/arduino_rig.ino.hex"
+elf = "firmware/build/arduino_rig.ino.elf"
+rfc2217ServerPort = 4000

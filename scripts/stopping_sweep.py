@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from agents.orchestrator import DiscoveryEngine
-from config import BASE_DIR, OutputConfig, SimulationConfig, StoppingConfig, SystemConfig
+from config import BASE_DIR, LLMConfig, OutputConfig, SimulationConfig, StoppingConfig, SystemConfig
 from experiments.registry import get_experiment, list_experiments
 
 CONFIGS: Dict[str, StoppingConfig] = {
@@ -56,6 +56,8 @@ def run_one(name: str, cfg: StoppingConfig, experiment: str, seed: int, runs_dir
         simulation=SimulationConfig(transit_delay_sec=0.0),
         stopping=cfg,
         output=OutputConfig(runs_dir=runs_dir, write_report=False),
+        # A numerical sweep of the stopping rule: no LLM, whatever .env says.
+        llm=LLMConfig(provider="none"),
     )
     record = DiscoveryEngine(sys_config).run()
     stop = record.stop
@@ -92,7 +94,7 @@ def run_one(name: str, cfg: StoppingConfig, experiment: str, seed: int, runs_dir
         "discrimination_sigma": _num(discrimination),
         "run_id": record.run_id,
         "rerun": (
-            f"python main.py --experiment {experiment} --seed {seed} --no-report "
+            f"python main.py --experiment {experiment} --seed {seed} --provider none --no-report "
             f"--min-points {cfg.min_points} {stability}"
         ),
     }
