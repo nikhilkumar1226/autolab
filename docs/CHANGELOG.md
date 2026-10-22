@@ -280,7 +280,36 @@ Nothing from the "Never take" column was ported.
 - **No real model has answered yet.** Gemini's structured-output mode may reject parts of the agent schemas (optional or nested fields). That would show up as `bad_request` and fall back to the next model. The first real run is the real test.
 - **The mock never picks its own point and never proposes a model.** It mirrors the baseline on purpose. Those paths are covered by scripted tests, but not by a live mock run.
 - **The Writer's number check is lexical.** It catches invented numbers, but not a real number attached to the wrong quantity.
-- **`sympy.parse_expr` uses `eval` internally.** It only ever receives text that has already passed the AST whitelist.
+- **`sympy.parse_expr` uses `eval` internally.** It only ever receives text that has already passed the AST whitelist. (Fixed: see "Phase 2 fix" below.)
 - **The Planner's own points are not filtered for novelty, as GP points are,** so it can repeat a position.
 - **Cost figures are estimates** from litellm's bundled price map.
 - **A user-supplied `--question` is passed unchanged in blind mode,** so it can reveal the apparatus. The CLI warns about this.
+
+## Phase 2 fix: AST whitelist evaluator replaces sympy.parse_expr (2026-10-22)
+
+### What changed
+- **LLM-proposed model expressions are no longer given to sympy.** `sympy.parse_expr` (and `sympify`) call Python's `eval` internally, so even after the AST gate the text reached `eval`. `analysis/candidate_models.py` now uses only Python's `ast` module and numpy:
+  1. **Gate.** Text over 200 characters, or containing `__` anywhere, is rejected before parsing. `ast.parse(mode="eval")` parses it (parsing runs nothing). Every node must be on the whitelist: `x`, the declared parameters, numbers (|c| ≤ 1e6), `pi`, `e`, binary `+ - * / **`, unary minus, and one-argument calls to `sin cos tan exp log sqrt abs radians` by bare name. Attributes, subscripts, strings, keyword arguments, lambdas, comparisons, unary plus and undeclared names are rejected. A constant exponent must still be one number with |value| ≤ 10.
+  2. **Evaluation.** The validated tree is turned into closures over a fixed table of numpy operations. A name is looked up in the parameter vector, never in a Python namespace.
+  3. **Structure checks, now numerical.** sympy's simplification used to catch expressions that do not depend on x, parameters with no effect, and undefined expressions such as `1/0`. These checks now use fixed probe points (x from −1000 to 1000, two generic parameter vectors, plus the LLM's guesses). Parameter kinds come from central-difference derivatives there: dy/dp = 1 everywhere is a y-offset, dy/dp = ±dy/dx everywhere an x-location, anything else a scale. The LLM's guesses can only make a kind harder to qualify for (test: `C*D` with a guessed `D = 1` stays a scale).
+  4. **LaTeX** for the report is printed from the validated tree, so `sympy.latex` is no longer needed.
+- `tan`, `abs`, `radians` and the constant `e` are new on the whitelist. Unary plus is no longer accepted (the whitelist names unary minus only). Python builtin names (`open`, `eval`, …) can no longer be parameter names.
+- `sympy` was removed from `requirements.txt` and uninstalled from the local virtualenv. No module imports it.
+- The Analyst system prompt now lists the new whitelist; `PROMPT_VERSION` is `phase2-v2`.
+- CLAUDE.md rule 2 is updated to match. ROADMAP.md Phase 2 has a note that step 3 changed after review.
+
+### Why
+CLAUDE.md rule 2 forbids `eval`/`exec` of LLM output. `parse_expr` uses `eval`, which was listed as a known limitation of Phase 2. An evaluator that walks the AST can run only operations from its own table, so a whitelist bug can no longer turn into code execution.
+
+### How it was verified
+- `pytest -q`: **230 passed**, offline (214 before). New or changed tests:
+  - the five required cases, written exactly as `__import__('os')`, `().__class__`, `x.real`, `open('f')` and `np.load('x')`, are rejected;
+  - the rejection table grew from 45 to 51 cases (unary plus, `~`, `np` as a bare name, `e` and `open` as parameter names, an expression with no x dependence);
+  - the static check also bans `parse_expr`, `sympify` and any `sympy` import in project code;
+  - a new dynamic test replaces `builtins.eval` and `builtins.exec` with functions that fail, then compiles, evaluates and prints a model;
+  - kinds for `radians(x + p)` and the Gaussian peak; the guess-cannot-change-kind case; LaTeX for the exponential and the Gaussian.
+- The suite also passes with sympy uninstalled.
+- **Baseline unchanged.** The `phase-2` tag and this fix were each run on the 3 experiments × seeds 0–4 with providers `none` and `mock` (30 runs each). All 30 are identical: stop reason, measurement count, best model and every measured point. `none` and `mock` are still identical to each other. Neither provider proposes a candidate model, so no other outcome was expected.
+
+### Known limitations
+- The numerical structure checks use fixed probe points. An expression that is finite only in a narrow x-range that none of the 33 probe points hits (for example `sqrt(x - 1234)`) is rejected as undefined, even though it might fit data in that range.

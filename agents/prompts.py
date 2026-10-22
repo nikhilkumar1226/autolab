@@ -18,7 +18,7 @@ import json
 import math
 from typing import Any
 
-PROMPT_VERSION = "phase2-v1"
+PROMPT_VERSION = "phase2-v2"
 
 PLANNER_SYSTEM = """You are the Planner of AutoLab, an autonomous laboratory that discovers how a measured quantity depends on one controlled variable.
 The input JSON gives the research question, the apparatus, the variables with units, and safe_bounds.
@@ -45,7 +45,7 @@ Return JSON with:
 - interpretation: 2-4 sentences on what the evidence shows, citing the numbers given;
 - residuals_suggest_missing_model: true only if the residuals show structure that no fitted model explains;
 - residual_comment: one sentence on the residuals;
-- candidate_model: null, or ONE new model not already in the table, when the residuals suggest one is missing: {"name", "expression", "parameters": [{"name", "initial_guess"}] (1-4), "rationale"}. The expression is sympy syntax in x using only numbers, x, your parameter names, pi, + - * / **, and sin, cos, exp, log, sqrt (trigonometric functions take radians). Anything else is rejected.
+- candidate_model: null, or ONE new model not already in the table, when the residuals suggest one is missing: {"name", "expression", "parameters": [{"name", "initial_guess"}] (1-4), "rationale"}. The expression is plain arithmetic in x (at most 200 characters) using only numbers, x, your parameter names, pi, e, + - * / ** and unary minus, and one-argument calls to sin, cos, tan, exp, log, sqrt, abs, radians (trigonometric functions take radians). Anything else is rejected.
 If candidate_slots_left is 0, candidate_model must be null. previous_proposals lists your earlier models and what happened to them."""
 
 STOP_SYSTEM = """You are the Planner of AutoLab. A fixed numerical rule has stopped the experiment; you do not decide whether to stop.
