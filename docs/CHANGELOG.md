@@ -684,3 +684,58 @@ The hardware part of the project needs something real to show: the actual firmwa
 - **SENSOR_LDR's lux conversion is nominal** (GL5528, R10 = 50 kΩ, γ = 0.7) until it is calibrated against a lux meter.
 - **The emulated sensor's noise uses a fixed seed (12345).** Firmware runs are not tied to the AutoLab run seed, so a Wokwi run is not reproducible from `--seed`. It is repeatable from a fresh board start with the same commands.
 - **The servo has no position feedback,** so on the real rig a stuck servo can only show up through its readings.
+
+## Phase 7: Dashboard (2026-10-22)
+
+### What changed
+- **Streamlit dashboard** (`streamlit run app/Home.py`), multipage:
+  - **Home:** what AutoLab is, the three data-source labels, and the session's access status.
+  - **Live Lab.** The sidebar sets the research question, experiment (the operator's view; agents never see the name), blind mode, agents (mock, no LLM, or a real LLM when allowed, with a model id), non-idealities, faults, seed and budget.
+    - Run starts the experiment in a background thread. The page redraws from the run's events about three times a second.
+    - The chart shows the measurements, the GP mean ± 2σ, the best model's curve and rejected or flagged requests. Below it are the candidate-model table (ΔBIC, and "not counted: parsimony") and the stopping criteria.
+    - Alongside: rig status, a feed of agent reasoning (Planner, Analyst, Executor, Safety guard, System; each message says who wrote it, LLM model, mock or rule) and a safety-event log. At the end: the result, its equation and the Writer's discussion.
+    - **E-STOP** latches the running engine's guard (`DiscoveryEngine.emergency_stop`); the run aborts cleanly as a safety abort.
+    - A prominent data-source badge sits at the top.
+  - **Run History:** every record in `runs/` and `runs/demo/`, newest first.
+    - Summary metrics, including whether the audit chain is intact.
+    - A replay slider over the attempts: the chart, the fits and the reasoning as they were at that attempt.
+    - Every attempt and every fault in tables.
+    - Downloads of the record (JSON), the attempts (CSV) and the report (Markdown).
+  - **Benchmark:** the figures (with PDF downloads), a filterable `benchmark_summary.csv`, the red-team summary and table, the Phase 3 fault sweep, and `RESULTS.md`. It reads `results/` only, and shows the mock-provider banner prominently.
+  - **System:** an architecture diagram (graphviz), the data flow, the safety layers and feature table and the standards mapping (from `docs/safety_and_standards.md`), the firmware summary, the Wokwi wiring, and a place for the circuit screenshot (`docs/img/wokwi_circuit.png`).
+- **Logic is kept out of the page files** (`app/lib/`):
+  - `access.py`: the public-demo policy and hosted secrets;
+  - `live.py`: the run thread, event folding and E-STOP;
+  - `views.py`: tables, curves, replay and the record index;
+  - `charts.py`: the Altair chart;
+  - `style.py`: page setup, badge and cards; agent text is HTML-escaped.
+
+  The pages only call the engine and read results.
+- **Public-demo protections.**
+  - A real LLM is offered only when an API key is configured AND `APP_PASSWORD` is set AND the visitor has entered it (constant-time compare). Otherwise every run uses the mock provider and the page says why.
+  - Per session: at most 10 runs, of which at most 3 with a real LLM. Budgets are capped at 30 measurements (mock or no LLM) and 20 (real LLM).
+  - Hosted Streamlit secrets fill the environment where `.env` has nothing; secrets are never displayed.
+- **Look:** a light theme (`.streamlit/config.toml`) using the benchmark palette, without emoji. The chart uses the validated categorical colours with a distinct mark per series.
+- **Tests run the pages headless** with Streamlit's `AppTest`.
+- `streamlit` was added to `requirements.txt`.
+
+### Why
+An examiner should be able to watch AutoLab work (what each agent proposed, what the guard refused, how the evidence built up until the rule stopped) and then open any run afterwards. The results chapter's figures should be one click away, and none of this should put the API credit at risk on a public link.
+
+### How it was verified
+- **`pytest -q`: 404 passed, offline, in about 120 s** (391 before). The 13 new tests in `tests/test_dashboard.py` cover:
+  - the access matrix: no key, no password, wrong password, right password, the session cap, and `provider_for` never returning litellm without access;
+  - hosted secrets filling the environment without overriding it;
+  - **a live run streaming step by step**: the page's snapshots saw at least 4 different point counts, rising, with Planner, Analyst and System messages, the GP band, the fits and the stop;
+  - **E-STOP mid-run**: a safety abort, "E-stop latched (operator pressed E-STOP on the dashboard)", the trip in the audit log;
+  - the tables, curve, replay and record index from a real record;
+  - **all five pages rendered with AppTest without an exception**;
+  - Live Lab run from the page (badge, result "Cosine-squared with phase", metrics, record saved), offering a real LLM only with a key and the right password (never chosen, so no call);
+  - Run History with the replay slider moved and all three downloads present.
+- **Done when (local run).** `streamlit run app/Home.py --server.port 8599 --server.headless true` started and `/_stcore/health` answered `ok`, then it was stopped. I could not look at the page in a browser; the streaming and AppTest checks above stand in for that.
+
+### Known limitations
+- **The Live Lab drives the digital twin only.** The firmware and the rig are run from the CLI (`--hardware`), because a serial port on a hosted app makes no sense and is not safe on a public link.
+- **The redraw is a polling loop (about 0.35 s).** Each redraw rebuilds the chart; with many points this could flicker on a slow machine. Not tested in a browser.
+- **Session caps live in the Streamlit session.** A visitor who reloads the page starts a new session, so the caps limit accidents, not determined abuse. The password is what protects the API credit.
+- **Run History lists only top-level `runs/` and `runs/demo/`,** not sweep or benchmark subfolders, and at most 200 records.
