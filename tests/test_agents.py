@@ -376,11 +376,14 @@ def test_litellm_run_records_tokens_cost_and_models_and_replays_from_cache(
     assert replay.measured_points() == record.measured_points()
 
 
-def test_when_every_model_fails_the_run_stops_with_a_clear_error(make_config, litellm_config, fake_litellm):
+def test_when_every_model_fails_the_run_stops_with_a_clear_error(make_config, litellm_config, fake_litellm, caplog):
     fake_litellm.responder = lambda kwargs: error("AuthenticationError", "invalid api key")
     cfg = make_config(llm=litellm_config())
     with pytest.raises(LLMUnavailableError, match="every model in the LLM chain failed"):
         DiscoveryEngine(cfg).run()
+    # An expected stop is logged as one clear line, not as a crash with a traceback.
+    engine_logs = [r for r in caplog.records if r.name == "agents.orchestrator"]
+    assert engine_logs and not any(r.exc_info for r in engine_logs)
 
     [path] = list_run_records(cfg.output.runs_dir)
     record = load_run_record(path)
