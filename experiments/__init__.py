@@ -3,6 +3,7 @@ Experiment registry: experiments described as data.
 """
 from experiments.registry import (
     AgentExperimentView,
+    BLIND_DESCRIPTION,
     ExperimentSpec,
     NoiseSettings,
     VariableSpec,
@@ -13,6 +14,7 @@ from experiments.registry import (
 
 __all__ = [
     "AgentExperimentView",
+    "BLIND_DESCRIPTION",
     "ExperimentSpec",
     "NoiseSettings",
     "VariableSpec",

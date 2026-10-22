@@ -4,12 +4,19 @@ Run autonomous scientific discovery loops on digital twin simulation or real phy
 """
 import argparse
 import logging
-from config import config, SystemConfig, HardwareConfig, AgentConfig, StoppingConfig, OutputConfig
+import sys
+from typing import List, Optional
+
+from rich.markup import escape
+
+from config import config, SystemConfig, HardwareConfig, AgentConfig, LLMConfig, StoppingConfig, OutputConfig
 from experiments.registry import list_experiments
 from agents.orchestrator import DiscoveryEngine
 from cli.console import ConsoleEventPrinter
+from llm.client import LLMUnavailableError
+from records.run_record import list_run_records
 
-def parse_args():
+def parse_args(argv: Optional[List[str]] = None):
     parser = argparse.ArgumentParser(
         description="Autonomous Scientific Discovery System - LLM Agents for Hardware-Grounded Experimental Design"
     )
@@ -26,6 +33,30 @@ def parse_args():
         type=str,
         default=None,
         help="Research question for the planner (default: a neutral question built from the variable names)"
+    )
+    parser.add_argument(
+        "--provider",
+        choices=["litellm", "mock", "none"],
+        default=None,
+        help="LLM provider: litellm (real model), mock (offline, no key) or none (no LLM; baseline). "
+             f"Default: LLM_PROVIDER from .env (now: {LLMConfig().provider})"
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="First model in the litellm chain, e.g. anthropic/claude-haiku-5-5 (default: LLM_MODEL from .env); "
+             "LLM_FALLBACKS still follow it"
+    )
+    parser.add_argument(
+        "--blind",
+        action="store_true",
+        help="Hide the apparatus description and the variable names from every LLM agent (units and bounds stay)"
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Do not serve LLM answers from llm_cache/ (and do not add to it)"
     )
     parser.add_argument(
         "--seed",
@@ -86,13 +117,15 @@ def parse_args():
         default=config.hardware.baud_rate,
         help=f"Baud rate for serial connection (default: {config.hardware.baud_rate})"
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
-def main():
-    args = parse_args()
-    logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
-
-    sys_config = SystemConfig(
+def build_config(args) -> SystemConfig:
+    llm = LLMConfig()
+    updates = {"provider": args.provider, "model": args.model}
+    llm = llm.model_copy(update={k: v for k, v in updates.items() if v is not None})
+    if args.no_cache:
+        llm = llm.model_copy(update={"cache": False})
+    return SystemConfig(
         experiment=args.experiment,
         seed=args.seed,
         hardware=HardwareConfig(
@@ -100,7 +133,8 @@ def main():
             port=args.port,
             baud_rate=args.baud,
         ),
-        agent=AgentConfig(sampler=args.sampler),
+        agent=AgentConfig(sampler=args.sampler, blind=args.blind),
+        llm=LLMConfig.model_validate(llm.model_dump()),
         stopping=StoppingConfig(
             max_measurements=args.budget,
             max_rel_se=args.rse_threshold,
@@ -110,11 +144,12 @@ def main():
         output=OutputConfig(write_report=not args.no_report),
     )
 
-    printer = ConsoleEventPrinter()
-    engine = DiscoveryEngine(sys_config, on_event=printer)
-    record = engine.run(question=args.question)
-
-    rerun = f"python main.py --experiment {args.experiment} --seed {record.seed}"
+def rerun_command(args, sys_config: SystemConfig, seed: int) -> str:
+    rerun = f"python main.py --experiment {args.experiment} --seed {seed} --provider {sys_config.llm.provider}"
+    if args.model:
+        rerun += f" --model {args.model}"
+    if args.blind:
+        rerun += " --blind"
     if args.budget != StoppingConfig().max_measurements:
         rerun += f" --budget {args.budget}"
     if args.rse_threshold != StoppingConfig().max_rel_se:
@@ -125,7 +160,31 @@ def main():
         rerun += " --stability" if args.stability else " --no-stability"
     if args.sampler != "gp":
         rerun += f" --sampler {args.sampler}"
-    printer.console.print(f"\n[bold]Done.[/bold] Reproduce this run with: [cyan]{rerun}[/cyan]")
+    return rerun
+
+def main(argv: Optional[List[str]] = None) -> int:
+    args = parse_args(argv)
+    logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
+
+    sys_config = build_config(args)
+    printer = ConsoleEventPrinter()
+    if args.blind and args.question:
+        printer.console.print("[yellow]Blind mode: your --question is passed to the agents unchanged and may reveal the apparatus.[/yellow]")
+    engine = DiscoveryEngine(sys_config, on_event=printer)
+    try:
+        record = engine.run(question=args.question)
+    except LLMUnavailableError as exc:
+        printer.console.print(f"\n[bold red]Run stopped: the LLM is unavailable.[/bold red] {escape(str(exc))}")
+        records = list_run_records(sys_config.output.runs_dir)
+        if records:
+            printer.console.print(f"The run record (with every attempt) is in {escape(str(records[-1]))}")
+        printer.console.print("Test the keys with [cyan]python -m llm.check[/cyan], or run with --provider mock.")
+        return 1
+
+    printer.console.print(f"\n[bold]Done.[/bold] Reproduce this run with: [cyan]{rerun_command(args, sys_config, record.seed)}[/cyan]")
+    if sys_config.llm.provider == "litellm":
+        printer.console.print("[dim]With litellm, a rerun replays the same LLM answers from llm_cache/ (unless --no-cache).[/dim]")
+    return 0
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

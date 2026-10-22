@@ -219,6 +219,9 @@ class LLMClient:
             record.ok, record.error = False, str(exc)
             exc.call = record
             raise
+        except Exception as exc:  # e.g. a mock policy returning an invalid answer: a bug, recorded and raised
+            record.ok, record.error = False, redact(f"{type(exc).__name__}: {exc}")
+            raise
         finally:
             record.latency_s = time.perf_counter() - t0
             if self._on_call is not None:

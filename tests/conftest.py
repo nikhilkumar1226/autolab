@@ -8,7 +8,10 @@ litellm.completion raises unless a test installs the scripted `fake_litellm`.
 import json
 import os
 
-os.environ["LLM_PROVIDER"] = "mock"  # before config is imported; load_dotenv never overrides it
+# Before config is imported (load_dotenv never overrides): tests never depend on the local .env.
+os.environ["LLM_PROVIDER"] = "mock"
+os.environ["LLM_MODEL"] = "anthropic/claude-haiku-5-5"
+os.environ["LLM_FALLBACKS"] = "gemini/gemini-3.6-flash,gemini/gemini-3.5-flash-lite"
 os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
 
 from typing import Any, Callable, Dict, List, Optional, Sequence
