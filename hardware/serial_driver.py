@@ -105,10 +105,11 @@ class SerialHardwareRig(BaseHardwareRig):
             except ImportError:
                 raise ImportError("pyserial is required for hardware. Run `pip install pyserial`.") from None
             factory = serial.serial_for_url
-        self._serial = factory(
-            self.config.port, baudrate=self.config.baud_rate,
-            timeout=self.config.timeout_seconds, write_timeout=self.config.timeout_seconds,
-        )
+        options = {"baudrate": self.config.baud_rate, "timeout": self.config.timeout_seconds}
+        if not self.is_simulated_firmware:
+            # pySerial's rfc2217 port (Wokwi) raises NotImplementedError on open if write_timeout is set.
+            options["write_timeout"] = self.config.timeout_seconds
+        self._serial = factory(self.config.port, **options)
         if not self.is_simulated_firmware:
             self._sleep(2.0)  # a USB Arduino resets when the port opens (DTR); wait for the bootloader
         for method in ("reset_input_buffer", "reset_output_buffer"):

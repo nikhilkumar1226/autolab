@@ -243,3 +243,26 @@ def test_no_simulator_stops_the_run_with_a_hint_before_anything_moves(tmp_path, 
     [path] = list_run_records(tmp_path / "runs")
     record = load_run_record(path)
     assert record.error.startswith("RigConnectionError") and record.steps == []
+
+
+def test_write_timeout_is_set_for_usb_but_not_for_rfc2217():
+    import serial
+    import serial.rfc2217
+    opened = {}
+
+    def factory(url, **kwargs):
+        opened[url] = kwargs
+        return port_factory(FakeBoard(seed=0))(url, **kwargs)
+
+    for port in (WOKWI, "/dev/ttyUSB0"):
+        SerialHardwareRig(HardwareConfig(port=port, timeout_seconds=0.1), port_factory=factory,
+                          sleep=lambda s: None).connect()
+    assert "write_timeout" not in opened[WOKWI] and opened[WOKWI]["timeout"] == 0.1
+    assert opened["/dev/ttyUSB0"]["write_timeout"] == 0.1
+    # pySerial's rfc2217 port refuses write_timeout when it opens; what the driver passes is accepted.
+    port = serial.rfc2217.Serial(None, **opened[WOKWI])
+    assert port.write_timeout is None
+    refused = serial.rfc2217.Serial(None, write_timeout=0.1)
+    refused._socket = object()  # as if connected, so open()'s port setup runs its checks; nothing is sent
+    with pytest.raises(NotImplementedError, match="write_timeout"):
+        refused._reconfigure_port()
