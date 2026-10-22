@@ -247,8 +247,13 @@ When done, stop and summarise what you built; I will then run the Phase checkpoi
 ```
 
 **Done when:**
-- [ ] All 6 experiments run with faults on and off.
-- [ ] The run JSON lists each injected fault and whether it was detected and recovered.
+- [x] All 6 experiments run with faults on and off. (All 8 registry experiments, from the CLI and as a test; see docs/CHANGELOG.md, Phase 3.)
+- [x] The run JSON lists each injected fault and whether it was detected and recovered. (`faults` and `fault_summary` in run-record schema 3.)
+
+*Changes from the prompt, decided during Phase 3 (reasons and numbers in docs/CHANGELOG.md):*
+- *Outliers are detected with the current best fit's prediction band (Student-t), not the GP band: the GP band gave 47 false alarms in 80 clean runs. The GP band stays available as an option.*
+- *The default fault schedule is spike 6, stuck 8, dropout 10–11, because in the example the stuck actuator at cycle 7 always falls on the spike's re-measurement.*
+- *Stefan–Boltzmann temperature is in kK, a parsimony rule lets a linear law converge, and a growing exponential covers the diode.*
 
 ---
 
