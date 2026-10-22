@@ -16,6 +16,7 @@ from agents.orchestrator import DiscoveryEngine
 from analysis.model_library import AnalysisResult
 from analysis.stopping import StopDecision
 from config import SystemConfig
+from experiments.registry import ExperimentSpec
 from records.run_record import RunRecord
 
 
@@ -62,10 +63,11 @@ def _by(source: Optional[str], model: Optional[str]) -> str:
 
 
 class LiveRun:
-    def __init__(self, config: SystemConfig, question: Optional[str] = None):
+    def __init__(self, config: SystemConfig, question: Optional[str] = None, spec: Optional[ExperimentSpec] = None):
         self.config = config
         self.question = question
-        self.engine = DiscoveryEngine(config, on_event=self._on_event)
+        # `spec` is given for a custom experiment (the operator's law); otherwise the registry entry is used.
+        self.engine = DiscoveryEngine(config, on_event=self._on_event, spec=spec)
         self._state = LiveState()
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None

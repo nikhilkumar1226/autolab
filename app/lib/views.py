@@ -9,7 +9,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from analysis.candidate_models import predict_fit
+from analysis.candidate_models import FormulaRejected, compile_law, predict_fit
 from analysis.model_library import AnalysisResult
 from analysis.stopping import StopDecision
 from config import BASE_DIR, RUNS_DIR
@@ -65,6 +65,20 @@ def best_curve(analysis: Optional[AnalysisResult], lo: float, hi: float, n: int 
         return pd.DataFrame(columns=["x", "y", "model"])
     ok = np.isfinite(y)
     return pd.DataFrame({"x": grid[ok], "y": y[ok], "model": best.name})
+
+
+def law_curve(law: Optional[str], lo: float, hi: float, n: int = 200) -> pd.DataFrame:
+    """A custom experiment's law over the range (empty for registry experiments or a law that no longer compiles)."""
+    if not law:
+        return pd.DataFrame(columns=["x", "y"])
+    try:
+        _, f = compile_law(law)
+    except FormulaRejected:
+        return pd.DataFrame(columns=["x", "y"])
+    grid = np.linspace(lo, hi, n)
+    y = f(grid)
+    ok = np.isfinite(y)
+    return pd.DataFrame({"x": grid[ok], "y": y[ok]})
 
 
 # --- run records ---------------------------------------------------------------------------

@@ -11,7 +11,7 @@ from typing import List, Literal, Optional
 from pydantic import BaseModel, Field, field_validator
 from dotenv import load_dotenv
 
-from experiments.registry import EXPERIMENTS
+from experiments.registry import CUSTOM_NAME, EXPERIMENTS
 
 load_dotenv()
 
@@ -286,8 +286,8 @@ class SystemConfig(BaseModel):
     @field_validator("experiment")
     @classmethod
     def _known_experiment(cls, name: str) -> str:
-        if name not in EXPERIMENTS:
-            raise ValueError(f"Unknown experiment '{name}'. Known: {', '.join(EXPERIMENTS)}")
+        if name not in EXPERIMENTS and name != CUSTOM_NAME:
+            raise ValueError(f"Unknown experiment '{name}'. Known: {', '.join(EXPERIMENTS)}, or '{CUSTOM_NAME}'")
         return name
 
 def describe_twin(cfg: SystemConfig) -> str:

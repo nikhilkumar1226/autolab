@@ -52,6 +52,7 @@ class ExperimentSnapshot(BaseModel):
     ground_truth_model: str
     true_params: Dict[str, float]
     physical_params: Optional[Dict[str, float]] = None
+    law: Optional[str] = Field(default=None, description="Custom experiments: the operator's law y = f(x)")
 
     @classmethod
     def from_spec(cls, spec: ExperimentSpec, noise_std: Optional[float]) -> "ExperimentSnapshot":
@@ -62,6 +63,7 @@ class ExperimentSnapshot(BaseModel):
             ground_truth_model=spec.ground_truth_model,
             true_params=dict(spec.true_params),
             physical_params=dict(spec.physical_params) if spec.physical_params is not None else None,
+            law=spec.law,
         )
 
 

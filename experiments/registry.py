@@ -102,6 +102,9 @@ class ExperimentSpec(BaseModel):
     )
     ground_truth_model: str = Field(description="Key of the analysis-library model that represents the true law")
     true_params: Dict[str, float] = Field(description="True parameters, named as in the library model")
+    law: Optional[str] = Field(
+        default=None, description="Custom experiments only: the law y = f(x) the operator typed (never shown to agents)"
+    )
 
     @model_validator(mode="after")
     def _check_bounds(self) -> "ExperimentSpec":
@@ -357,6 +360,11 @@ EXPERIMENTS: Dict[str, ExperimentSpec] = {
 }
 
 
+# Name of an operator-defined experiment (experiments/custom.py). It has no registry entry: its
+# spec is built from the law the operator types and passed to the engine directly.
+CUSTOM_NAME = "custom"
+
+
 def list_experiments() -> List[str]:
     return list(EXPERIMENTS)
 
@@ -365,4 +373,7 @@ def get_experiment(name: str) -> ExperimentSpec:
     try:
         return EXPERIMENTS[name]
     except KeyError:
+        if name == CUSTOM_NAME:
+            raise KeyError("A custom experiment has no registry entry: build its spec with "
+                           "experiments.custom.build_custom_experiment and pass it to the engine") from None
         raise KeyError(f"Unknown experiment '{name}'. Known: {', '.join(EXPERIMENTS)}") from None

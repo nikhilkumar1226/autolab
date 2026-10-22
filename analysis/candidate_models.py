@@ -386,6 +386,31 @@ def compile_candidate(spec: CandidateModelSpec, key: str, name: Optional[str] = 
     )
 
 
+def compile_law(expression: str) -> Tuple[str, Callable[[np.ndarray], np.ndarray]]:
+    """A fixed law y = f(x) typed by the operator for a custom digital-twin experiment.
+
+    It goes through the same gate as an LLM proposal (never eval, exec or sympy), with no free
+    parameters: numbers, x, pi, e, + - * / **, unary minus and the whitelisted functions. A
+    leading "y =" is accepted and "^" means "**". Returns the normalised text and a function of
+    x. Raises FormulaRejected with a reason.
+    """
+    raw = expression.strip()
+    if re.match(r"^y\s*=(?!=)", raw):
+        raw = raw.split("=", 1)[1].strip()
+    if not raw:
+        raise FormulaRejected("the law is empty")
+    if len(raw) > MAX_EXPRESSION_CHARS:
+        raise FormulaRejected(f"expression longer than {MAX_EXPRESSION_CHARS} characters")
+    text = raw.replace("^", "**")
+    tree = _parse(text, [])
+    evaluate = _build(tree.body, {})
+
+    def law(x):
+        return _evaluate(evaluate, np.asarray(x, dtype=float), ())
+
+    return text, law
+
+
 @functools.lru_cache(maxsize=64)
 def _recompile(key: str, name: str, expression: str, params: Tuple[str, ...]) -> CandidateModel:
     spec = CandidateModelSpec(

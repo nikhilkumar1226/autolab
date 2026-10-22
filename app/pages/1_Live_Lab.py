@@ -18,7 +18,9 @@ from app.lib.charts import discovery_chart
 from app.lib.live import LiveRun, LiveState, make_config
 from app.lib.style import badge, card, chip, setup_page
 from app.lib.views import best_curve, criteria_table, fits_table
-from experiments.registry import EXPERIMENTS, get_experiment
+from app.lib.views import law_curve
+from experiments.custom import EXAMPLES, CustomLaw, agreement_verdict, build_custom_experiment, law_agreement
+from experiments.registry import CUSTOM_NAME, EXPERIMENTS, get_experiment
 
 setup_page("Live Lab")
 ss = st.session_state
@@ -30,21 +32,52 @@ with st.sidebar:
     st.header("Experiment")
     entered = st.text_input("App password (for the real LLM)", type="password") if password_configured() else ""
     access = decide(entered, ss.runs, ss.llm_runs)
-    names = list(EXPERIMENTS)
+    names = [*EXPERIMENTS, CUSTOM_NAME]
     experiment = st.selectbox(
         "Experiment", names, index=0,
-        format_func=lambda n: f"{get_experiment(n).independent.name} → {get_experiment(n).dependent.name} ({n})",
+        format_func=lambda n: "✎ Your own law (custom experiment)" if n == CUSTOM_NAME else
+        f"{get_experiment(n).independent.name} → {get_experiment(n).dependent.name} ({n})",
         help="The operator's view. The agents are never told the experiment's name or its law.",
     )
-    spec = get_experiment(experiment)
-    question = st.text_area("Research question (optional)", placeholder=f"How does the {spec.dependent.name} depend on "
-                            f"the {spec.independent.name}?", height=80)
+    custom_error = ""
+    if experiment == CUSTOM_NAME:
+        st.caption("Type any law y = f(x). The digital twin simulates it with noise; the agents see only the "
+                   "variable names, units and range, never the law.")
+        example = st.selectbox("Start from an example", list(EXAMPLES))
+        ex_law, ex_lo, ex_hi = EXAMPLES[example]
+        law_text = st.text_input(
+            "Law  y = f(x)", value=ex_law, key=f"law_{example}",
+            help="Numbers, x, pi, e, + - * / ** (or ^), and sin cos tan exp log sqrt abs radians. Checked by the same "
+                 "whitelist as the Analyst's formulas and never run as code.")
+        c1, c2 = st.columns(2)
+        x_min = c1.number_input("x from", value=ex_lo, key=f"xmin_{example}")
+        x_max = c2.number_input("x to", value=ex_hi, key=f"xmax_{example}")
+        x_name = c1.text_input("x name", value="input")
+        x_units = c2.text_input("x units", value="a.u.")
+        y_name = c1.text_input("y name", value="response")
+        y_units = c2.text_input("y units", value="a.u.")
+        noise_pct = st.slider("Noise (% of the response span)", 0.2, 10.0, 1.0, 0.1,
+                              help="Standard deviation of the simulated measurement noise.")
+        try:
+            spec = build_custom_experiment(CustomLaw(
+                expression=law_text, x_min=x_min, x_max=x_max, x_name=x_name or "input", x_units=x_units,
+                y_name=y_name or "response", y_units=y_units, noise_pct=noise_pct))
+        except ValueError as exc:
+            spec, custom_error = None, str(exc).splitlines()[-1] if "validation error" in str(exc) else str(exc)
+            st.error(f"Cannot run this law: {custom_error}")
+    else:
+        spec = get_experiment(experiment)
+    y_word, x_word = (spec.dependent.name, spec.independent.name) if spec is not None else ("response", "input")
+    question = st.text_area("Research question (optional)", placeholder=f"How does the {y_word} depend on "
+                            f"the {x_word}?", height=80)
     providers = ["mock", "none"] + (["litellm"] if access.real_llm else [])
     provider_choice = st.radio(
         "Agents", providers, horizontal=True,
         format_func={"mock": "mock (offline stand-in)", "none": "no LLM", "litellm": "real LLM"}.get,
         help="mock: deterministic policies, not a language model. no LLM: rules only (the baseline).",
     )
+    if not access.real_llm:
+        st.caption(f"Real LLM not offered: {access.reason}.")
     model = st.text_input("Model (litellm id)", value="", placeholder="default chain from settings") \
         if provider_choice == "litellm" else ""
     blind = st.toggle("Blind mode", value=False, help="Hide the apparatus and variable names from every agent.")
@@ -61,16 +94,16 @@ provider = provider_for(provider_choice, access)
 header = st.empty()
 
 c_run, c_stop, c_info = st.columns([1, 1, 4])
-run_clicked = c_run.button("Run", type="primary", disabled=bool(live and live.alive) or access.max_runs <= 0,
-                           width="stretch")
+run_clicked = c_run.button("Run", type="primary", width="stretch",
+                           disabled=bool(live and live.alive) or access.max_runs <= 0 or spec is None)
 stop_clicked = c_stop.button("E-STOP", disabled=not (live and live.alive), width="stretch",
                              help="Latch the safety guard now: nothing moves until an operator resets it; the run aborts.")
 c_info.caption(f"Runs left this session: {access.max_runs}. {access.reason.capitalize()}.")
 
-if run_clicked and not (live and live.alive) and access.max_runs > 0:
+if run_clicked and not (live and live.alive) and access.max_runs > 0 and spec is not None:
     run_seed = secrets.randbits(31) if random_seed else seed
     cfg = make_config(experiment, run_seed, provider, model, blind, nonideal, faults, budget)
-    live = LiveRun(cfg, question.strip() or None).start()
+    live = LiveRun(cfg, question.strip() or None, spec=spec if experiment == CUSTOM_NAME else None).start()
     ss.live = live
     ss.runs += 1
     ss.llm_runs += provider == "litellm"
@@ -105,11 +138,17 @@ def render(s: LiveState, running: bool) -> None:
         chips.append(chip("E-STOP LATCHED", warn=True))
     header.markdown(badge(source) + "".join(chips), unsafe_allow_html=True)
 
-    shown = get_experiment(s.experiment) if s.experiment else spec  # the running experiment, not the sidebar's
-    lo, hi = shown.safe_bounds
+    shown = live.engine.spec if live is not None else spec  # the running experiment, not the sidebar's
+    if shown is None:
+        lo, hi, x_title, y_title, law = 0.0, 1.0, "x", "y", None
+    else:
+        lo, hi = shown.safe_bounds
+        x_title = f"{shown.independent.name} ({shown.independent.units})"
+        y_title = f"{shown.dependent.name} ({shown.dependent.units})"
+        law = shown.law
     chart_slot.altair_chart(discovery_chart(
-        s.points, s.gp, best_curve(s.analysis, lo, hi), s.flagged,
-        f"{shown.independent.name} ({shown.independent.units})", f"{shown.dependent.name} ({shown.dependent.units})", [lo, hi],
+        s.points, s.gp, best_curve(s.analysis, lo, hi), s.flagged, x_title, y_title, [lo, hi],
+        truth=law_curve(law, lo, hi) if s.finished else None,  # the operator's law, only once the run is over
     ), width="stretch")
     fits_slot.dataframe(fits_table(s.analysis), hide_index=True, width="stretch")
     criteria_slot.dataframe(criteria_table(s.stop_check), hide_index=True, width="stretch")
@@ -146,6 +185,10 @@ def render(s: LiveState, running: bool) -> None:
                 st.caption(r.stop.message if r.stop else "")
                 if r.result and r.result.equation_latex:
                     st.latex(r.result.equation_latex)
+                if r.experiment.law:
+                    gap = law_agreement(r.experiment.law, best, r.experiment.agent_view.safe_bounds, r.experiment.noise_std)
+                    st.markdown(f"**Your law** (never shown to the agents): `y = {r.experiment.law}`")
+                    (st.success if gap is not None and gap <= 3.0 else st.warning)(agreement_verdict(gap))
                 if r.discussion is not None and r.discussion.discussion:
                     label = "Writer (mock template)" if r.discussion.source == "mock" else f"Writer ({r.discussion.model})"
                     st.markdown(card("Writer", f"{r.discussion.discussion}\n\n{r.discussion.conclusion}", by=label),

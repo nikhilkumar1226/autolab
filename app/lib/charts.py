@@ -14,12 +14,19 @@ GP, MODEL, INK, FLAG, MUTED, GRID = "#2a78d6", "#eb6834", "#0b0b0b", "#d03b3b", 
 
 def discovery_chart(points: List[Dict[str, Any]], gp: Optional[Dict[str, List[float]]], curve: pd.DataFrame,
                     flagged: List[Dict[str, Any]], x_title: str, y_title: str, x_domain: List[float],
-                    height: int = 380) -> alt.LayerChart:
+                    height: int = 380, truth: Optional[pd.DataFrame] = None) -> alt.LayerChart:
+    """`truth`: a custom experiment's law (x, y), drawn only after the run, for the operator."""
     x = alt.X("x:Q", title=x_title, scale=alt.Scale(domain=x_domain, nice=False))
     layers = []
     legend = alt.Legend(title=None, orient="top")
-    series = alt.Color("series:N", scale=alt.Scale(
-        domain=["GP mean ± 2σ", "Best model", "Measured", "Rejected or flagged"], range=[GP, MODEL, INK, FLAG]), legend=legend)
+    names, colours = ["GP mean ± 2σ", "Best model", "Measured", "Rejected or flagged"], [GP, MODEL, INK, FLAG]
+    if truth is not None and not truth.empty:
+        names, colours = names + ["Your law"], colours + [MUTED]
+    series = alt.Color("series:N", scale=alt.Scale(domain=names, range=colours), legend=legend)
+    if truth is not None and not truth.empty:
+        layers.append(alt.Chart(truth.assign(series="Your law")).mark_line(strokeWidth=3, opacity=0.6).encode(
+            x=x, y=alt.Y("y:Q", title=y_title), color=series,
+            tooltip=[alt.Tooltip("x:Q", format=".4g"), alt.Tooltip("y:Q", title="your law", format=".4g")]))
     if gp:
         band = pd.DataFrame({"x": gp["x"], "mean": gp["mean"], "std": gp["std"]})
         band["lo"], band["hi"], band["series"] = band["mean"] - 2 * band["std"], band["mean"] + 2 * band["std"], "GP mean ± 2σ"

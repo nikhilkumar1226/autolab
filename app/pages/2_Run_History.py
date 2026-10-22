@@ -14,9 +14,10 @@ import streamlit as st
 
 from app.lib.charts import discovery_chart
 from app.lib.style import badge, card, chip, setup_page
-from app.lib.views import (DEMO_RUNS_DIR, best_curve, fits_table, list_records, record_summary, replay, steps_frame,
-                           summary_metrics)
+from app.lib.views import (DEMO_RUNS_DIR, best_curve, fits_table, law_curve, list_records, record_summary, replay,
+                           steps_frame, summary_metrics)
 from config import RUNS_DIR
+from experiments.custom import agreement_verdict, law_agreement
 from records.run_record import load_run_record
 
 setup_page("Run History")
@@ -67,6 +68,12 @@ e.metric("Audit log", "intact" if m["audit_ok"] else ("not recorded" if m["audit
 st.caption(m["message"])
 if m["equation"]:
     st.latex(m["equation"])
+if record.experiment.law:
+    best_fit = record.result.final_analysis.best if record.result and record.result.final_analysis else None
+    gap = law_agreement(record.experiment.law, best_fit, record.experiment.agent_view.safe_bounds,
+                        record.experiment.noise_std)
+    st.markdown(f"**Custom experiment.** The operator's law (never shown to the agents): `y = {record.experiment.law}`")
+    (st.success if gap is not None and gap <= 3.0 else st.warning)(agreement_verdict(gap))
 
 st.subheader("Replay")
 attempts = [s.index for s in record.steps]
@@ -83,6 +90,7 @@ with left:
         state["points"], None, best_curve(state["analysis"], lo, hi), state["flagged"],
         f"{spec_view.independent.name} ({spec_view.independent.units})",
         f"{spec_view.dependent.name} ({spec_view.dependent.units})", [lo, hi], height=340,
+        truth=law_curve(record.experiment.law, lo, hi),
     ), width="stretch")
     st.markdown("**Candidate models at this attempt**")
     st.dataframe(fits_table(state["analysis"]), hide_index=True, width="stretch")

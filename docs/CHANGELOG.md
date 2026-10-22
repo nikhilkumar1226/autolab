@@ -811,3 +811,22 @@ The full benchmark stays available for when credit exists.
 ### Fix after Phase 5.1: no write_timeout on rfc2217 (Wokwi)
 - **What changed.** The serial driver passed `write_timeout` to every port. pySerial's rfc2217 port raises `NotImplementedError("write_timeout is currently not supported")` when it opens, so every Wokwi connection failed. The tests did not catch it because the fake port accepts any argument. `write_timeout` is now set only for USB ports; on rfc2217 the read timeout still applies.
 - **Verified:** a new test checks the options passed for a Wokwi URL and a USB port. It also builds pySerial's real rfc2217 port with the driver's options, and shows that pySerial refuses `write_timeout`. Both run offline. `pytest -q`: 418 passed. Not yet re-run against Wokwi itself.
+
+## Custom experiments on the dashboard (2026-10-22)
+
+### What changed
+- **Live Lab → "✎ Your own law (custom experiment)".** The operator types any law y = f(x), a range, variable names and units and a noise level (default 1 % of the response span, as in the registry experiments). The digital twin simulates it and the full loop runs as for any experiment. Six examples are offered as starting points, one of them deliberately outside the model library (a sine).
+- **The law is never executed.** `analysis.candidate_models.compile_law()` sends it through the same whitelist gate as the Analyst's proposals (AST parse, node whitelist, tree-walking numpy evaluator; no eval, exec or sympy), with no free parameters. `experiments/custom.py` then checks that the law is finite and varies over the range and derives the instruments from it: noise, sensor full scale with half a span of headroom, resolution, actuator tolerance and step limit.
+- **The agents never see the law.** They get the operator's variable names, units and range and a generic one-line description. The law is kept in the spec and in the run record (`experiment.law`, optional, so older records still load).
+- **Judging a custom run.** There is usually no library model for an arbitrary law, so the run is judged by `law_agreement()`: the largest gap between the best model's curve and the law over the range, in noise standard deviations. Within 3σ is reported as "recovered", otherwise as "not recovered", with the reason. After the run, the chart shows the law as a grey line, on Live Lab and in Run History.
+- **The real-LLM option says why it is hidden.** Below the agent choice, the sidebar now states the reason (no key, no APP_PASSWORD, or the password not yet entered).
+
+### How it was verified
+- Mock runs, 5 seeds each: the quadratic, exponential-decay, inverse-square and straight-line examples were recovered and converged in 8–22 measurements, within 0.2–1.4σ of the law. The square-root law was found as a power law but usually reached the 30-point budget. The sine was reported as not recovered (38–44σ).
+- `tests/test_custom_experiment.py` (29 tests):
+  - the gate rejects `__import__`, attributes, `open`, lambdas, `9**9**9`, undeclared names and over-long text;
+  - laws that are infinite or constant on the range are refused with a reason;
+  - the agent view contains no part of the law;
+  - full runs recover library laws and flag the sine;
+  - the record keeps the law;
+  - the Live Lab page refuses a bad law and runs a good one end to end.
