@@ -16,9 +16,9 @@ AutoLab loop on top. It does not test real optics.
 
 1. Install the **Wokwi Simulator** extension in VS Code.
 2. Press F1 and choose **Wokwi: Request a New License**. Sign in; the free licence is enough.
-3. The built firmware is already in the repository (`firmware/build/arduino_rig.ino.hex` and `.elf`).
+3. **Nothing to build.** The built firmware is already in the repository (`firmware/build/arduino_rig.ino.hex` and `.elf`), and `wokwi.toml` points at it. Skip the build unless you changed the sketch. (Without arduino-cli, `scripts/build_firmware.sh` fails with "arduino-cli: command not found"; that is expected and does not matter.)
 
-To rebuild it after changing the sketch, install [arduino-cli](https://arduino.github.io/arduino-cli/) and run:
+Only to rebuild it after changing the sketch, install [arduino-cli](https://arduino.github.io/arduino-cli/) and run:
 
 ```bash
 arduino-cli core install arduino:avr
@@ -67,6 +67,9 @@ The run is labelled **PHYSICAL RIG**. The LDR conversion to lux is a nominal GL5
 
 | Symptom | Cause |
 |---|---|
-| `Failed to connect to the rig on rfc2217://localhost:4000` | The simulator is not running, or another program holds port 4000. |
+| `Run stopped before anything moved: could not connect to the rig on rfc2217://localhost:4000 (… Connection refused)` | The simulator is not running (start it first and wait until the board is drawn), or another program holds port 4000. |
+| `arduino-cli: command not found` | You ran the build script. It is not needed: the built firmware is committed. |
+| Wokwi says it cannot find `wokwi.toml` or the firmware | VS Code has a different folder open. Open the `autolab` folder itself (File → Open Folder). |
+| Wokwi asks for a licence | F1 → **Wokwi: Request a New License**, finish the sign-in in the browser, and let the browser return to VS Code. |
 | Every command times out | The Wokwi tab is in the background (the simulation pauses), or the firmware did not load. Check the `firmware` path in `wokwi.toml`. |
 | `firmware E_ESTOP` | The firmware's E-stop is latched (an `ESTOP` command, or 300 s without a command). The run aborts; start a new run, or send `RESET`. |

@@ -802,3 +802,8 @@ The full benchmark stays available for when credit exists.
 - **The token estimate excludes hidden reasoning tokens.** gpt-oss on Groq reasons before answering, which counts against Groq's token-per-minute limit.
 - **3 seeds give wide intervals.** Differences between LLM methods and baselines mix the method with the seed set (3 vs 20); the "same seeds only" table and the figure footers say so.
 - **The answering model can change during a run** when Gemini runs out and Groq takes over. The label lists every model with its share of calls, and each call in the run records names its model, but a table row is not tied to a single model.
+
+### Fix after Phase 5.1: a clear stop when the rig or Wokwi is not reachable
+- **What changed.** If the serial rig did not connect (for example Wokwi not started), the failure was logged and the run went on to HOME, which crashed with a pyserial traceback. Now the run stops before anything moves with `RigConnectionError` ("could not connect to the rig on <port> (<reason>)"). The run record keeps the error. The CLI prints a hint: for `rfc2217://` to start the Wokwi simulator and keep its tab visible, for USB to check the cable, firmware and port.
+- `docs/wokwi.md` now says plainly that the firmware is already built (no arduino-cli needed) and lists the common setup errors.
+- **Verified:** a new test refuses the connection the way pyserial does when nothing listens on port 4000 and checks the message, the hint and the record; by hand, the real command without a simulator now prints the hint. `pytest -q`: 417 passed.
