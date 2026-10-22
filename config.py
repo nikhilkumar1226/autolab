@@ -180,8 +180,9 @@ class LLMConfig(BaseModel):
 class SafetyConfig(BaseModel):
     """Safety-guard limits that are not experiment-specific (bounds and step size come from the spec)."""
     max_moves_per_s: float = Field(
-        default=5.0, gt=0.0,
-        description="Rate limit: at most this many actuator moves in any 1 s window of the rig's clock"
+        default=10.0, gt=0.0,
+        description="Rate limit: at most this many actuator moves in any 1 s window of the rig's clock. The firmware "
+                    "takes at least 0.12 s per move and reading, so legitimate traffic stays below 10/s on the real rig"
     )
     max_moves_without_reading: int = Field(
         default=3, ge=1,

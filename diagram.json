@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "author": "AutoLab",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "wokwi-arduino-uno", "id": "uno", "top": 0, "left": 0, "attrs": {} },
+    { "type": "wokwi-servo", "id": "servo", "top": -150, "left": 120, "attrs": { "hornColor": "#2a78d6" } },
+    { "type": "wokwi-photoresistor-sensor", "id": "ldr", "top": 260, "left": 330, "attrs": {} }
+  ],
+  "connections": [
+    [ "servo:PWM", "uno:9", "orange", [ "v0" ] ],
+    [ "servo:V+", "uno:5V", "red", [ "v0" ] ],
+    [ "servo:GND", "uno:GND.1", "black", [ "v0" ] ],
+    [ "ldr:AO", "uno:A0", "green", [ "v0" ] ],
+    [ "ldr:VCC", "uno:5V", "red", [ "v0" ] ],
+    [ "ldr:GND", "uno:GND.2", "black", [ "v0" ] ]
+  ],
+  "serialMonitor": { "display": "never" },
+  "dependencies": {}
+}

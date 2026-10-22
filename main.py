@@ -213,6 +213,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
 
+    if args.hardware and args.experiment != "malus_law":
+        print("--hardware drives the polariser rig (servo + light sensor), so it supports --experiment malus_law only.",
+              file=sys.stderr)
+        return 2
     sys_config = build_config(args)
     printer = ConsoleEventPrinter()
     if args.blind and args.question:

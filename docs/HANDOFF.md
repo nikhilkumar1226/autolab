@@ -12,6 +12,7 @@ Rules I followed: provider `mock` (or `none`) only, no real LLM or paid API was 
 | 3 | `phase-3-digital-twin` | `phase-3` | 311 passed | 2 of 2 pass |
 | 4 | `phase-4-safety` | `phase-4` | 358 passed | 2 of 2 pass (red team: 59 cases, 0 unsafe commands reached the rig) |
 | 5 | `phase-5-benchmark` | `phase-5` | 367 passed | 1 of 3 pass (`--quick` in 142 s); the real-LLM run and sending `results/` are yours |
+| 6 | `phase-6-firmware` | `phase-6` | 391 passed | 0 of 2: both need Wokwi in VS Code (your step 5). Firmware compiles; the full run passes against a fake port |
 
 ## Decisions I made
 
@@ -49,6 +50,14 @@ Rules I followed: provider `mock` (or `none`) only, no real LLM or paid API was 
 - **Cost estimates for mock runs** price characters / 4 with litellm's bundled price for `anthropic/claude-haiku-5-5`. **INR uses an assumed 88 INR/USD**; set the real rate with `--usd-inr`.
 - **`results/quick/` is git-ignored;** it is a 2-minute smoke test.
 
+### Phase 6 (details in CHANGELOG "Phase 6"; how-to in docs/wokwi.md)
+- **The sketch moved to `firmware/arduino_rig/arduino_rig.ino`**, because arduino-cli needs that layout. The default build is `SENSOR_EMULATED` (Malus's law on the chip, same values as the twin). The `.hex` and `.elf` for Wokwi are committed, so you don't need to compile anything.
+- **I compiled all three sensor variants** with a temporary arduino-cli in the scratchpad; nothing was installed on your Mac.
+- **Firmware watchdog: 300 s** without a command releases the servo and latches the E-stop (long, because real LLM calls sit between moves).
+- **`wokwi.toml` and `diagram.json` are in the project root**, where the Wokwi extension looks.
+- **Rate limit 10 moves/s** (was 5): the real firmware alone can do about 8/s legitimately.
+- **`--hardware` now works for `malus_law` only.**
+
 ## What you must do yourself
 
 1. **`.env` layout.** Your `.env` still has the old Groq/Ollama layout. Copy the layout from `.env.example` (Claude first, then the two Gemini models) and add `ANTHROPIC_API_KEY` and `GEMINI_API_KEY`. I did not touch `.env`.
@@ -63,6 +72,13 @@ Rules I followed: provider `mock` (or `none`) only, no real LLM or paid API was 
    - The Gemini free tier (about 20/day on Flash) cannot cover this; Claude credit is needed. Answers are cached, so a rerun is free.
    - Then send me `results/`.
 4. **Red team against a real model** (optional, costs a little): `python -m safety.redteam --provider litellm --out results/redteam_litellm.csv` runs the prompt-injection cases against Claude/Gemini.
+5. **Wokwi (Phase 6 Done-when):**
+   - Install the Wokwi Simulator extension in VS Code.
+   - F1, then **Wokwi: Request a New License**.
+   - F1, then **Wokwi: Start Simulator**; keep the tab visible.
+   - Run `python main.py --experiment malus_law --hardware --port rfc2217://localhost:4000 --provider mock`.
+   - Take a screenshot of the circuit for the black book.
+   - Details and troubleshooting are in `docs/wokwi.md`.
 
 ## Open questions
 
