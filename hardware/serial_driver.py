@@ -84,6 +84,7 @@ class SerialHardwareRig(BaseHardwareRig):
         self._current_position = 0.0
         self._is_busy = False
         self.firmware: Dict[str, str] = {}
+        self.last_error = ""  # why the last connect() failed, for the run's error message
         self.events: list = []
 
     @property
@@ -127,10 +128,12 @@ class SerialHardwareRig(BaseHardwareRig):
                         raise
             self.firmware = parse_fields(self._command("VERSION", retry=False))
             self._connected = True
+            self.last_error = ""
             logger.info("Connected to %s: firmware %s", self.config.port, self.firmware)
             return True
         except Exception as exc:
             logger.error("Failed to connect to the rig on %s: %s", self.config.port, exc)
+            self.last_error = f"{type(exc).__name__}: {exc}"
             self.disconnect()
             return False
 

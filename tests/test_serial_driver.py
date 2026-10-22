@@ -221,3 +221,25 @@ def test_the_wokwi_project_points_at_the_built_firmware_and_wires_the_parts():
 def test_parse_fields():
     assert parse_fields("STATUS: OK, POS: 12.00, HOMED: 1") == {"STATUS": "OK", "POS": "12.00", "HOMED": "1"}
     assert parse_fields("STATUS: ERROR, CODE: E_BOUNDS, MSG: angle outside [0, 180]")["CODE"] == "E_BOUNDS"
+
+
+def test_no_simulator_stops_the_run_with_a_hint_before_anything_moves(tmp_path, monkeypatch, capsys):
+    import serial
+    from config import OutputConfig
+    from records.run_record import list_run_records, load_run_record
+
+    def refused(*args, **kwargs):
+        raise serial.SerialException("Could not open port rfc2217://localhost:4000: [Errno 61] Connection refused")
+
+    monkeypatch.setattr(serial, "serial_for_url", refused)
+    build = main.build_config
+    output = OutputConfig(runs_dir=tmp_path / "runs", plots_dir=tmp_path / "plots", reports_dir=tmp_path / "reports")
+    monkeypatch.setattr(main, "build_config", lambda args: build(args).model_copy(update={"output": output}))
+    argv = ["--experiment", "malus_law", "--hardware", "--port", WOKWI, "--provider", "mock", "--no-report"]
+    assert main.main(argv) == 1
+    out = capsys.readouterr().out
+    assert "Run stopped before anything moved" in out and "Connection refused" in out
+    assert "Wokwi: Start Simulator" in out and "Traceback" not in out
+    [path] = list_run_records(tmp_path / "runs")
+    record = load_run_record(path)
+    assert record.error.startswith("RigConnectionError") and record.steps == []

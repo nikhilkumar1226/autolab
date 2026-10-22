@@ -18,6 +18,7 @@ from config import (
 from experiments.registry import list_experiments
 from agents.orchestrator import DiscoveryEngine
 from cli.console import ConsoleEventPrinter
+from hardware.base import RigConnectionError
 from llm.client import LLMUnavailableError
 from records.run_record import list_run_records
 
@@ -237,6 +238,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         if records:
             printer.console.print(f"The run record (with every attempt) is in {escape(str(records[-1]))}")
         printer.console.print("Test the keys with [cyan]python -m llm.check[/cyan], or run with --provider mock.")
+        return 1
+    except RigConnectionError as exc:
+        printer.console.print(f"\n[bold red]Run stopped before anything moved:[/bold red] {escape(str(exc))}")
+        if sys_config.hardware.port.startswith("rfc2217://"):
+            printer.console.print(
+                "Is the Wokwi simulator running? In VS Code, open the autolab folder, press F1 and choose "
+                "[cyan]Wokwi: Start Simulator[/cyan]. Wait until the board is drawn and keep its tab visible "
+                "(Wokwi pauses in the background), then run this command again. See docs/wokwi.md."
+            )
+        else:
+            printer.console.print("Check the USB cable, that the firmware is uploaded, and the port name (--port).")
         return 1
 
     printer.console.print(f"\n[bold]Done.[/bold] Reproduce this run with: [cyan]{rerun_command(args, sys_config, record.seed)}[/cyan]")
