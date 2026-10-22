@@ -175,3 +175,112 @@ ROADMAP.md asks for each phase to end with its "Done when" list checked against 
 - **"A JSON file appears in `runs/` for every run."** Nine CLI runs added nine records (10 → 19). The crash path is covered by `tests/test_run_record.py`. **Pass.**
 - **Wrong law in a random-seed run.** One of the three random-seed inverse-square runs, seed 1321740821, converged on the **power law** at n = 9. This matches the known limitation of about 1 wrong inverse-square run in 20 (38/40 correct in the seeded sweeps). Three random runs are too few to estimate a rate. Reproduce it with `python main.py --experiment inverse_square_law --seed 1321740821`.
 - **Git hygiene:** `.env` is untracked and git-ignored, and `runs/` is git-ignored. The only key-like strings in the diff are the `sk-ant-...` placeholders in ROADMAP.md's setup guide.
+
+## Phase 2: Real LLM agents (2026-10-22)
+
+### What changed
+- **LLM client** (`llm/client.py`). Every agent asks a model through `LLMClient.complete_json(system, user, schema)`, which returns a Pydantic-validated object. The provider comes from `LLM_PROVIDER` or `--provider`:
+  - `litellm` (a real model). The chain is `LLM_MODEL`, then `LLM_FALLBACKS` in order.
+    - Each request uses JSON-schema output, or plain JSON mode if litellm says the model cannot take a schema. It has a 30 s timeout and no litellm-internal retries.
+    - An invalid answer is re-asked up to 2 times, with the validation error fed back.
+    - HTTP 429 is retried twice with jittered exponential backoff (the jitter comes from the run seed).
+    - The next model is tried after auth errors, "credit balance too low", rate limits, timeouts, 5xx, unknown models, connection errors and persistently invalid JSON. A model whose API key is missing or empty is skipped without sending a request.
+    - If every model fails, `LLMUnavailableError` stops the run with every model's error listed. It never falls back to the mock.
+  - `mock`: deterministic and offline. Each agent supplies a policy that sees exactly the JSON payload a real model would see. Its answer is validated like a real one.
+  - `none`: no LLM. The agents use the Phase 1 heuristics; this is the ablation baseline.
+  - Validated answers are cached in `llm_cache/` (git-ignored) and looked up in chain order, so a rerun with the same seed replays the same answers at no cost. `--no-cache` turns this off.
+  - Anything that looks like an API key is redacted from errors before they are logged or recorded. Cost estimates use litellm's bundled price map, which is never fetched over the network.
+  - `python -m llm.check` sends one tiny request to every model in the chain and prints OK or the error for each.
+- **Planner** (`agents/lead_scientist.py`). It proposes a hypothesis from the research question and the agent view: a statement, 1–5 candidate relationships in words, the independent variable and a range. It also proposes an initial design of 3–5 points with a rationale.
+  - The proposed range is clipped to the spec's safe bounds in code, and the clip is logged and recorded. The range never reaches the safety guard, the GP or the simulator. All three are built from the spec before the Planner is asked.
+  - Initial-design positions are queued unmodified, so the guard is what rejects bad ones.
+  - Before each later measurement, the Planner either delegates to the GP (uncertainty sampling) or gives its own point, always with a reason. It sees the data, the ranked fits, the unmet stopping criteria, the GP suggestion, the budget left and recent rejections. It also sees the x inside the bounds where the two best models disagree most, in noise units: the model-discrimination idea from the Phase 1 limitations.
+  - The numerical stopping rule still decides when to stop. The Planner only writes the stop rationale.
+- **Safety feedback.** If the guard rejects a proposal, a `safety_rejection` event is emitted and the guard's message goes back to the Planner as an observation. The Planner may re-propose up to 2 times; after that the GP proposes once.
+  - `max_consecutive_failures` now counts measurement *slots*: one proposal plus its re-proposals and the GP fallback. With provider `none` there is no agent to tell, so each attempt is its own slot, exactly as in Phase 1.
+- **Analyst** (`agents/analyst.py`). After the blind numerical fits, the Analyst LLM sees the variable names and units, the data, the fit table (parameters, relative SE, BIC, ΔBIC, R²) and a residual summary (`analysis/diagnostics.py`). The residual summary gives the signs ordered by x, the runs-test z, the lag-1 autocorrelation and the largest standardised residual.
+  - It never sees the apparatus description, the research question, the hypothesis or the experiment name.
+  - It returns an interpretation, whether the residuals suggest a missing model, and optionally ONE new candidate model.
+  - At most 3 LLM models are accepted per run. An accepted model is ranked *before* the stop check.
+- **Safe candidate models** (`analysis/candidate_models.py`). A proposed expression is never executed. It goes through two whitelists:
+  1. **The text is parsed by `ast`.** Allowed: numbers up to 1e6, `x`, the declared parameters, `pi`, `+ - * / **`, and `sin cos exp log sqrt` called by bare name with one argument. A constant exponent must be a single number with |value| ≤ 10, which blocks inputs like `9**9**9` that would make sympy compute a huge integer.
+  2. **`sympy.parse_expr` runs with a namespace that holds only those names.** Its tree is checked again, then evaluated by a small tree-walking numpy evaluator, with no `eval`, `exec` or `lambdify`.
+
+  After that:
+  - Parameter kinds (scale, x-location, offset) set how the stopping rule normalises relative SE. They are inferred from the expression's structure, not taken from the LLM, so the LLM cannot loosen that criterion.
+  - Rejected expressions are logged and recorded with the reason, and the run continues.
+  - An LLM model is skipped if its curve stays within 0.5σ of a library fit over the measured range. Without this, a duplicate or near-copy of the best model would stay within ΔBIC ≈ ln n of it and block the ΔBIC ≥ 6 criterion forever. Library models are never removed.
+- **Writer** (`agents/writer.py`). It writes the report's discussion and conclusion from facts extracted from the run record, with the instruction to use only those numbers.
+  - Every number in the text is checked against the facts at the precision written.
+  - If any number does not match, the Writer is asked once more. Numbers that still don't match are listed under the section in the report.
+- **Blind mode** (`--blind`). Every LLM agent sees the variables as `x` and `y` and a generic apparatus sentence. Units and safe bounds stay. The report itself, written for people, keeps the real names.
+- **Prompts.** All system prompts are in `agents/prompts.py`, which records a `PROMPT_VERSION`. User messages are compact JSON with numbers at 4 significant figures.
+- **Run records** (schema 2). New content:
+  - every LLM call: agent, purpose, models tried, the model that answered, system and user prompt, raw and parsed answer, validation errors, tokens, estimated cost, latency, cached or not;
+  - LLM usage totals;
+  - the reason behind each step;
+  - every candidate model and what happened to it;
+  - the stop rationale, the discussion, and warnings.
+
+  Schema 1 records still load.
+- **Events, console, report and CLI.**
+  - New events: `strategy` and `llm_call`.
+  - The console and report show which agents took part (provider, the models that answered, tokens, cost). The report has new "Agent reasoning" and "Discussion and conclusion" sections, and every piece of agent text is labelled with who wrote it.
+  - New CLI flags: `--provider`, `--model`, `--blind`, `--no-cache`. The rerun command includes them.
+  - If the LLM is unavailable, the CLI prints one clear error and exits with code 1.
+- **LLM failure after the stop decision.** If every model fails for the stop rationale or the Writer, the result and report are kept. The missing section reads "not generated: …", and the same text goes to `record.warnings` and is printed in red. During the experiment loop, the same failure stops the run with an error.
+- **Bug fix: the GP no longer re-sends a rejected position.** With fewer than 2 measured points, the GP returned the midpoint even right after the guard had rejected it. It now returns the nearest grid point that is not close to a measured or rejected position. When the midpoint is allowed, the behaviour is unchanged.
+- **Housekeeping.**
+  - `sympy` added to `requirements.txt`.
+  - `reference/` and `llm_cache/` git-ignored.
+  - `scripts/stopping_sweep.py` pinned to provider `none`.
+  - The unused `AgentConfig.model_name` (default "gpt-4o") and `temperature` removed.
+
+### Why
+The project title says "LLM agents", but the original code never called an LLM (see CLAUDE.md, "Known issues"). An examiner who asks "show me the prompt" must be able to see the real prompt, the reasoning it produced, and what that reasoning was allowed to change.
+
+The design keeps the Phase 1 guarantees:
+- every position still passes the guard;
+- the stopping rule stays numerical;
+- the Analyst stays blind;
+- provider `none` reproduces Phase 1 exactly, so the benchmark has a clean no-LLM baseline.
+
+Piyush's version (`AI-Laboratory`) was used read-only for the "Take" column of ROADMAP.md, and each idea was tightened:
+- **`compile_safe_model_callable`** allowed `np.<attr>` calls (so `np.load('x')` got through) and ran the generated code with `exec`. The new compiler allows no attribute access and runs nothing.
+- **His litellm call** fell back silently to keyword matching on any exception. The new chain raises a clear error instead.
+- **His mocked-litellm test style** (`patch("litellm.completion")`) is kept, as a scripted fake in `tests/conftest.py`.
+
+Nothing from the "Never take" column was ported.
+
+### How it was verified
+- **`pytest -q`: 214 passed offline in about 20–30 s** (98 before). No test can reach a real LLM: the provider is forced to mock, and `litellm.completion` raises unless a test installs the scripted fake. New tests cover:
+  - the client: retries with the error fed back; the fallback chain on auth / credit / timeout / 5xx / 404 / connection errors; 429 backoff; all models failing; a missing key skipped without a request; cache hits and replays; redaction; `llm.check` output;
+  - 45 dangerous or invalid formulas rejected with a reason, including `__import__('os')`, `np.load('x')` and `().__class__`;
+  - a project-wide static check that no `eval`, `exec`, `compile`, `__import__` or `lambdify` is called;
+  - structural parameter kinds, and a library duplicate filtered as equivalent;
+  - a missing law (a Gaussian peak, not in the library) proposed by the Analyst LLM, accepted and ranked first;
+  - an LLM range of [−50, 500] clipped while the guard keeps [0, 180];
+  - a rejected proposal fed back, then a re-proposal, then the GP fallback after 2 rejected re-proposals, with no rejected position re-sent by the GP;
+  - the Writer's invented number flagged;
+  - blind mode hiding names and apparatus from every prompt, and the Analyst never seeing the apparatus, question or hypothesis;
+  - a late LLM failure kept as a warning, and a run without any key failing before the rig moves;
+  - a schema 1 record loading, and the CLI flags.
+- **Phase 1 equivalence:** the `phase-1` tag, `--provider none` and `--provider mock` were each run on the 3 experiments × seeds 0–4. All 15 runs are identical across the three: measurements, stop reasons, laws found and point counts.
+- **Prompt size:** about 230–720 tokens per call. A run makes about 2 calls per measurement after the initial design, plus the plan, the stop rationale and the Writer.
+- **"Done when" checks** (run against the current `.env`, which still has the old layout, `LLM_MODEL=groq/...`, and no keys set):
+
+  | Item | Result |
+  |---|---|
+  | `python -m llm.check` shows which keys work (Claude, Gemini) | **Not yet.** The tool runs and reports each model correctly ("missing GROQ_API_KEY; no request sent", "missing GEMINI_API_KEY", Ollama connection refused) and exits 1. No Claude or Gemini key is configured, so no key could be shown to work. |
+  | `python main.py --provider mock` works with no key | **Pass.** It converged on cos² at n = 8 with 12 mock calls (plan, strategy, review, stop rationale, Writer), and wrote the record and report. A seeded rerun with `--no-report` made 11 calls (no Writer). |
+  | With a real key, `--provider litellm` works and the JSON shows prompts, responses, tokens and cost | **Not yet: no key.** Without keys the run stops before any measurement. The error lists every model, the record is saved with the failed attempts, and nothing falls back to mock (exit code 1). The full litellm path is covered offline by the scripted fake: tokens, cost, the answering model, and cache replay. |
+  | `--provider none` still works | **Pass.** It converged on cos² at n = 8, with 0 LLM calls. |
+
+### Known limitations
+- **No real model has answered yet.** Gemini's structured-output mode may reject parts of the agent schemas (optional or nested fields). That would show up as `bad_request` and fall back to the next model. The first real run is the real test.
+- **The mock never picks its own point and never proposes a model.** It mirrors the baseline on purpose. Those paths are covered by scripted tests, but not by a live mock run.
+- **The Writer's number check is lexical.** It catches invented numbers, but not a real number attached to the wrong quantity.
+- **`sympy.parse_expr` uses `eval` internally.** It only ever receives text that has already passed the AST whitelist.
+- **The Planner's own points are not filtered for novelty, as GP points are,** so it can repeat a position.
+- **Cost figures are estimates** from litellm's bundled price map.
+- **A user-supplied `--question` is passed unchanged in blind mode,** so it can reveal the apparatus. The CLI warns about this.

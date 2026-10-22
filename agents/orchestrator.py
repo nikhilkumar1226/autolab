@@ -222,7 +222,10 @@ class DiscoveryEngine:
             self._experiment_loop(run)
             self._finish(run, t0)
         except Exception as exc:
-            logger.exception("Run %s failed", run_id)
+            if isinstance(exc, LLMUnavailableError):
+                logger.error("Run %s stopped: %s", run_id, exc)  # expected and fully described: no traceback
+            else:
+                logger.exception("Run %s failed", run_id)
             record.error = f"{type(exc).__name__}: {exc}"
             record.stop = self._stop_check(run, len(tools.history_x), override=StopReason.ERROR)
             record.llm_usage = LLMUsage.from_calls(record.llm_calls)
