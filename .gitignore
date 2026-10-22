@@ -29,3 +29,6 @@ runs/*
 # teammate's reference copy (read-only inspiration) and the LLM response cache
 reference/
 llm_cache/
+
+# benchmark smoke-test output (python -m benchmark.run --quick regenerates it in about 2 minutes)
+results/quick/

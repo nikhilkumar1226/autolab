@@ -115,6 +115,23 @@ class LabTools:
         self.history_y.append(measurement.sensor_value)
         return ExecutionOutcome(status="measured", message=message, **common)
 
+    def reachable_window(self) -> Optional[Tuple[float, float]]:
+        """
+        The positions the guard would accept next: inside the bounds, within the step limit of the
+        current position and below any response-limit ceiling. None when that is the whole range.
+        """
+        limits = self.safety_guard.limits
+        lo, hi = limits.min_position, limits.max_position
+        if limits.max_step_delta < hi - lo:
+            here = self.safety_guard.get_status().current_position
+            lo, hi = max(lo, here - limits.max_step_delta), min(hi, here + limits.max_step_delta)
+        ceiling = self.safety_guard.ceiling
+        if ceiling is not None:
+            hi = min(hi, ceiling - 1e-6 * (limits.max_position - limits.min_position))
+        if (lo, hi) == (limits.min_position, limits.max_position):
+            return None
+        return lo, max(lo, hi)
+
     def discard(self, position: float) -> None:
         """Give up a position after persistent anomalies; the GP will not propose it again."""
         self.discarded_positions.append(position)

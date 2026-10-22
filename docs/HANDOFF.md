@@ -11,6 +11,7 @@ Rules I followed: provider `mock` (or `none`) only, no real LLM or paid API was 
 | 2 (fix) | `phase-2-llm-agents` | `phase-2.1` | 230 passed | 2 of 4 pass; the other 2 need your keys |
 | 3 | `phase-3-digital-twin` | `phase-3` | 311 passed | 2 of 2 pass |
 | 4 | `phase-4-safety` | `phase-4` | 358 passed | 2 of 2 pass (red team: 59 cases, 0 unsafe commands reached the rig) |
+| 5 | `phase-5-benchmark` | `phase-5` | 367 passed | 1 of 3 pass (`--quick` in 142 s); the real-LLM run and sending `results/` are yours |
 
 ## Decisions I made
 
@@ -40,6 +41,14 @@ Rules I followed: provider `mock` (or `none`) only, no real LLM or paid API was 
 - **The red team uses a scripted adversary** through a new `completion=` hook in `LLMClient`. It replaces only the network call and is not used anywhere else. No real model was called.
 - **The twin now parks at the lowest safe position**, not at 0. A property test found that the LDR read 0 lux after homing and divided by zero.
 
+### Phase 5 (details in CHANGELOG "Phase 5"; numbers in results/RESULTS.md)
+- **`results/` is filled from `--full --provider mock`:** 3,680 runs. The grid, random and GP-only rows are real benchmark data; the LLM-method rows are mock and labelled as such everywhere. Your real-LLM run reuses the baseline rows and reruns only the LLM methods.
+- **LLM-only needed a sampler, which I added** (`--sampler llm`). The mock policy, and the fallback when there is no LLM, is a fixed rule: the point where the two best models disagree most, or else the middle of the widest gap.
+- **Equal budget** means each baseline runs to exactly AutoLab's median n for that experiment and condition.
+- **Learning curves** come from separate 20-point runs on the clean twin.
+- **Cost estimates for mock runs** price characters / 4 with litellm's bundled price for `anthropic/claude-haiku-5-5`. **INR uses an assumed 88 INR/USD**; set the real rate with `--usd-inr`.
+- **`results/quick/` is git-ignored;** it is a 2-minute smoke test.
+
 ## What you must do yourself
 
 1. **`.env` layout.** Your `.env` still has the old Groq/Ollama layout. Copy the layout from `.env.example` (Claude first, then the two Gemini models) and add `ANTHROPIC_API_KEY` and `GEMINI_API_KEY`. I did not touch `.env`.
@@ -47,7 +56,13 @@ Rules I followed: provider `mock` (or `none`) only, no real LLM or paid API was 
    - `python -m llm.check` → should print OK for Claude and Gemini.
    - `python main.py --provider litellm` → check the run JSON in `runs/` shows the real prompts, responses, tokens and cost.
 
-3. **Red team against a real model** (optional, costs a little): `python -m safety.redteam --provider litellm --out results/redteam_litellm.csv` runs the prompt-injection cases against Claude/Gemini.
+3. **The real-LLM benchmark** (Phase 5 Done-when). With the Claude key in `.env`:
+   - Check first: `python -m benchmark.run --full --provider litellm --dry-run`.
+   - Small first run (2 seeds, clean twin, about 1,600 calls): `python -m benchmark.run --full --provider litellm --llm-seeds 2 --conditions clean --workers 2`.
+   - Full run: `python -m benchmark.run --full --provider litellm --workers 2`. With the mock policies it made about 6,700 calls. Estimated about $0.6 at the bundled Haiku price, but check the Anthropic Usage page after the first few runs.
+   - The Gemini free tier (about 20/day on Flash) cannot cover this; Claude credit is needed. Answers are cached, so a rerun is free.
+   - Then send me `results/`.
+4. **Red team against a real model** (optional, costs a little): `python -m safety.redteam --provider litellm --out results/redteam_litellm.csv` runs the prompt-injection cases against Claude/Gemini.
 
 ## Open questions
 

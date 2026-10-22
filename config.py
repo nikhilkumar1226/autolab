@@ -195,9 +195,11 @@ class SafetyConfig(BaseModel):
 
 class AgentConfig(BaseModel):
     initial_sample_count: int = Field(default=4, ge=2, description="Number of initial exploration points before active learning")
-    sampler: Literal["gp", "random"] = Field(
+    sampler: Literal["gp", "random", "grid", "llm"] = Field(
         default="gp",
-        description="How points after the initial design are chosen: GP uncertainty sampling or uniform random (baseline)"
+        description="How points after the initial design are chosen: gp = GP uncertainty sampling (the Planner may "
+                    "choose its own point instead); random / grid = baselines; llm = the Planner chooses every point, "
+                    "without a GP"
     )
     blind: bool = Field(
         default=False,

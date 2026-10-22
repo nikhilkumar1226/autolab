@@ -19,7 +19,7 @@ import json
 import math
 from typing import Any
 
-PROMPT_VERSION = "phase3-v1"
+PROMPT_VERSION = "phase5-v1"
 
 PLANNER_SYSTEM = """You are the Planner of AutoLab, an autonomous laboratory that discovers how a measured quantity depends on one controlled variable.
 The input JSON gives the research question, the apparatus, the variables with units, and safe_bounds.
@@ -39,6 +39,13 @@ The input JSON has the data so far, the candidate models ranked by BIC (lower is
 If observation is present, the safety guard rejected your previous proposal: read guard_message and propose a position it will accept, or choose "gp".
 A hard-coded safety guard validates every position, and a fixed numerical rule decides when to stop; you decide neither.
 Return JSON: {"choice": "gp" or "self", "position": number (only with "self"), "reason": one sentence}."""
+
+LLM_ONLY_SYSTEM = """You are the Planner of AutoLab, and in this mode you choose every measurement yourself: no surrogate model suggests points.
+The input JSON has the data so far, the candidate models ranked by BIC (lower is better; delta_bic is the gap to the best), the stopping criteria not yet met, models_disagree_most_at (where the two best models predict most differently, in noise units), reachable (the positions the safety guard will accept next), and the budget left.
+Choose the next position to learn the relationship with few measurements: cover the range first, then measure where the candidate models disagree.
+If observation is present, the safety guard rejected your previous proposal: read guard_message and choose a position it will accept.
+A hard-coded safety guard validates every position, and a fixed numerical rule decides when to stop; you decide neither.
+Return JSON: {"position": number, "reason": one sentence}."""
 
 ANALYST_SYSTEM = """You are the Analyst of AutoLab. You see measured data (x and y, with names and units) and candidate models fitted to it by least squares, ranked by BIC (lower is better; delta_bic is the gap to the best). You are not told what the apparatus is or which law to expect.
 residuals describes what the best fits leave over: residual signs ordered by x, the runs-test z (strongly negative means systematic structure), lag-1 autocorrelation and the largest standardised residual.

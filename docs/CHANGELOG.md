@@ -537,3 +537,85 @@ The paper's central claim is that a hallucinating or compromised model can never
 - **On hardware, the 5 moves/s rate limit has not been checked** against the real servo's timing.
 - **The red team's "blocked at LLM/agent level" includes the run stopping** because every answer was invalid. That is safe but ends the run. A real model that answers badly once would usually recover on the re-ask.
 - **The red team has not been run against a real model.** `--provider litellm` runs the question-injection cases only, and needs keys.
+
+## Phase 5: Benchmark (2026-10-22)
+
+### What changed
+- **Benchmark harness** (`benchmark/`), run as `python -m benchmark.run --quick | --full [--provider mock|litellm]`.
+  - `run.py`: the run plan, parallel workers and resume.
+  - `metrics.py`: scoring each run against the ground truth.
+  - `summary.py`: statistics.
+  - `figures.py`: the figures.
+  - `report.py`: the CSVs and `RESULTS.md`.
+- **Methods.** All five start from the same 4-point design and use the same stopping rule and safety guard.
+
+  | Method | How later points are chosen | LLM |
+  |---|---|---|
+  | `grid` | New `GridSampler`: coarse to fine (ends, middle, quarters, eighths …), so the points are spread out whenever the rule stops | no |
+  | `random` | Uniform; `RandomSampler` now draws only from the reachable window | no |
+  | `gp_only` | GP uncertainty sampling (provider `none`) | no |
+  | `llm_only` | New sampler `llm`: the Planner chooses every point itself, with no GP (`LLM_ONLY_SYSTEM`, `PointChoice` schema). The mock policy and the no-LLM fallback are the same rule (`gap_point`): where the two best models disagree by ≥ 2 σ if that point is reachable and new, otherwise the middle of the widest unmeasured gap | yes |
+  | `autolab` | The full system | yes |
+
+  `--sampler grid|llm` is also available in `main.py`, and the report describes each sampler.
+- **Conditions and run kinds.**
+  - Conditions: clean, non-idealities on, and faults (the default schedule).
+  - `adaptive` runs use the normal rule with a budget of 30.
+  - `fixed` runs put grid, random and GP-only at exactly AutoLab's median n for that experiment and condition, for the equal-budget comparison.
+  - `curve` runs take every method on the clean twin to exactly 20 points; the parameter error after each point gives the learning curves.
+  - Seeds: 20 for non-LLM methods and 5 for LLM methods (`--seeds`, `--llm-seeds`); 2 and 2 with `--quick`.
+- **Metrics per run:**
+  - measurements, attempts, and the stop reason;
+  - the law identified, blind;
+  - the error of each true-law parameter, absolute and normalised by kind like the stopping rule (|true| for a scale, the x-span for a location, the response span for an offset, whose true value can be 0);
+  - fault outcomes, outliers detected, false alarms;
+  - LLM calls, tokens and cost in USD and INR;
+  - wall time.
+
+  With non-idealities on, the Malus truth uses the polariser's effective parameters (A' = A(1 − 1/ER), C' = C + A/ER).
+
+  For mock runs, the tokens a real model would use are estimated as prompt and answer characters / 4. They are priced with litellm's bundled price map for `--estimate-model` (default `anthropic/claude-haiku-5-5`). INR uses an assumed 88 INR/USD (`--usd-inr`).
+- **Outputs.**
+  - `results/benchmark_runs.csv`: one row per run, with its `run_id` and record.
+  - `results/benchmark_summary.csv`: mean, std and 95% CI per run kind × method × experiment × condition, plus pooled rows (`ALL`). Proportions use Wilson intervals and means use Student-t.
+  - `results/figures/` (PNG at 300 dpi and PDF):
+    - parameter error vs. measurements (geometric mean and 95% CI);
+    - law accuracy;
+    - equal-budget accuracy;
+    - fault recovery;
+    - cost per run.
+  - `results/RESULTS.md`, generated: tables plus a line on each figure. Its banner states the data source and, for mock runs, that the LLM rows say nothing about a real LLM. It also reports a check that AutoLab-mock and GP-only are identical on shared seeds.
+
+  The figures use a validated colour-blind-safe palette with a marker and line style per method. Every figure has a footer with its data source, provider and seed caveat.
+- **Execution.**
+  - Parallel workers (`--workers`, default number of CPUs − 1).
+  - Resume-safe: each finished run is stored in `runs/benchmark/<mode>/rows/`. Non-LLM rows do not depend on the provider, so `--provider litellm` reruns only the LLM methods.
+  - `--dry-run` prints the plan and an estimate of the real-LLM calls.
+  - `--quick` writes to `results/quick/`, which is git-ignored.
+
+### Why
+The results chapter needs numbers that are reproducible and honest. This means repeated seeded runs, baselines at an equal budget, intervals rather than single runs, and a clear label whenever a number did not come from a real model.
+
+### How it was verified
+- **`pytest -q`: 367 passed, offline, in about 112 s** (358 before). The 9 new tests in `tests/test_benchmark.py` cover:
+  - parameter-error normalisation by kind (including an offset whose true value is 0), and the polariser's effective parameters;
+  - Student-t and Wilson intervals against known values;
+  - the grid order and the reachable windows;
+  - the `gap_point` rule;
+  - LLM-only mode with mock (Planner) and with `none` (rule), where the GP is never asked;
+  - a tiny end-to-end benchmark: every output written, equal budgets, 20-point curves, AutoLab-mock equal to GP-only, then a second run with nothing left to do;
+  - the dry run.
+- **Done when: `--quick` runs in under a few minutes.** Passed: 142 s for 464 runs on 7 workers, from an empty work folder.
+- **`--full --provider mock`:** 3,680 runs (2,240 adaptive and curve runs, then 1,440 equal-budget runs), 0 errors, about 25 minutes on 7 workers. Results in `results/`. The non-LLM methods are real benchmark data. The LLM rows are mock: AutoLab-mock was identical to GP-only on all 120 shared runs, as designed.
+- **Provider-independent findings** (non-LLM methods, 20 seeds, 8 experiments):
+  - **The adaptive stopping rule earns its extra measurements.** On the clean twin, at AutoLab's median budget (mean n 8.9), GP-only is right in 151/160 runs, grid in 152/160 and random in 151/160. With the adaptive rule they reach 158/160 (mean n 10.2), 159/160 (10.6) and 157/160 (11.0).
+  - **Faults cost accuracy mainly on inverse-square** (GP-only 14/20, random 13/20, grid 17/20) and on Hooke (GP-only 16/20, random 19/20, grid 18/20; the cos² near-tie from Phase 3). Every other experiment is at least 18/20 with faults.
+  - Stuck actuators and dropouts are recovered in 100% of runs for every method. Spikes are recovered in 87–90% of runs. Random outliers with non-idealities on: 31 of 230 detected (see the Phase 3 limitation).
+  - Median parameter error at the stop: 0.96–1.18% on the clean twin, 1.8–2.1% with non-idealities on.
+
+### Known limitations
+- **No real LLM has run the benchmark**, so the ROADMAP's second Done-when item is still open. The mock answers are fixed policies, so "what the LLM adds" cannot be read from these results.
+- **The LLM methods have 5 seeds, the baselines 20.** Any difference between the two groups mixes method and seed set. RESULTS.md and the figure footers say so.
+- **Cost estimates** come from characters / 4 and litellm's bundled price map, which may lag behind real prices. The INR rate (88) is an assumption.
+- **The parameter error is the true law's fit,** even in runs that identified another law. Law accuracy is reported separately.
+- **Learning curves cover the clean twin only.**
