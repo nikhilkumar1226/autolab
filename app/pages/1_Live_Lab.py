@@ -109,11 +109,12 @@ header = st.empty()
 c_run, c_stop, c_info = st.columns([1, 1, 4])
 run_clicked = c_run.button("Run", type="primary", width="stretch",
                            disabled=bool(live and live.alive) or access.max_runs <= 0 or spec is None)
-stop_clicked = c_stop.button("E-STOP", disabled=not (live and live.alive), width="stretch",
+starting = run_clicked and not (live and live.alive) and access.max_runs > 0 and spec is not None
+stop_clicked = c_stop.button("E-STOP", disabled=not (starting or (live and live.alive)), width="stretch",
                              help="Latch the safety guard now: nothing moves until an operator resets it; the run aborts.")
 c_info.caption(f"Runs left this session: {access.max_runs}. {access.reason.capitalize()}.")
 
-if run_clicked and not (live and live.alive) and access.max_runs > 0 and spec is not None:
+if starting:
     run_seed = secrets.randbits(31) if random_seed else seed
     cfg = make_config(experiment, run_seed, provider, model, blind, nonideal, faults, budget)
     live = LiveRun(cfg, question.strip() or None, spec=spec if experiment == CUSTOM_NAME else None,
@@ -221,8 +222,11 @@ def render(s: LiveState, running: bool) -> None:
 if live is None:
     render(LiveState(), running=False)
 else:
+    was_running = live.alive
     while live.alive:
         render(live.snapshot(), running=True)
         time.sleep(0.35)
     live.join()
     render(live.snapshot(), running=False)
+    if was_running:
+        st.rerun()  # redraw the buttons: Run enabled again, E-STOP greyed out

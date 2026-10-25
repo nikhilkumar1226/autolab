@@ -646,6 +646,7 @@ class DiscoveryEngine:
                 run, "Discussion", lambda: run.writer.write(record),
                 lambda message: Discussion(source="unavailable", note=message),
             )
+            record.llm_usage = LLMUsage.from_calls(record.llm_calls)  # the report header quotes these totals
             self._write_report(run)
             record.timings.report_s = time.perf_counter() - t_rep
 
