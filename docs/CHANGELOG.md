@@ -830,3 +830,31 @@ The full benchmark stays available for when credit exists.
   - full runs recover library laws and flag the sine;
   - the record keeps the law;
   - the Live Lab page refuses a bad law and runs a good one end to end.
+
+## Experiments drafted from a name (2026-10-25)
+
+### What changed
+- **Live Lab → custom experiment → "By name (the LLM drafts it)".** The operator types the name of any single-variable experiment (for example "simple pendulum: period against length") and presses *Draft the experiment*. A language model (the configured chain, e.g. Gemini then Groq) drafts a title, a short apparatus description, the controlled and measured variables with units, a realistic range, the textbook law y = f(x) with every constant substituted by its number, the constants it used and a noise level. The draft fills editable fields. Nothing runs until the operator ticks *I have checked the law, the range and the units*; the Run button stays disabled until then. The run is then an ordinary custom experiment.
+- **The draft passes the same gates as a typed law** (`experiments/drafting.py`): the whitelist compiler, the finiteness and span checks of `build_custom_experiment`, and a new check that the variable names (which the agents see) contain no word hinting at the law ("law", "Ohm", "exponential", "linear", "cos", ...). A draft that fails is re-asked up to twice with the previous draft and the problem fed back; an infeasible name (not a single-variable measurement) is refused with the model's reason.
+- **Blind as before.** The Drafter is not a discovery agent and takes no part in the run. The agents never see the name typed, the apparatus text, the constants or the law; they get the generic custom-experiment description with the variable names, units and range. Blind mode still hides the names.
+- **Provenance in the run record.** `experiment.draft` (optional, so older records load) holds the name typed, the provider and model that drafted the law, the drafted law, whether the operator edited any field, the confirmation, the number of re-asks and every drafting call with its prompt and answer. Live Lab and Run History show "drafted from … by …, confirmed by the operator".
+- **Offline.** Without a real model (no key or no app password, or after 10 drafts in a session) the drafting uses the mock, a fixed table of eight textbook experiments (pendulum, resistor, cooling, free fall, capacitor discharge, gas syringe, charged spheres, spring). Any other name is refused with a message saying a real LLM is needed. With provider "none" there is no drafting. Drafted experiments run on the digital twin only.
+- **Drafting is shown step by step.** A status box lists each step as it happens: which model is asked, the draft it returned (variables, units, law), the checks, any rejection sent back, and "All checks passed". Afterwards the steps stay available under "How the draft was made".
+- **Demo pace (Live Lab sidebar, on by default).** Pauses 0.9 s after each measurement so an audience can follow a run point by point on the chart, the candidate-model table and the agent feed. It only slows the dashboard's run thread: the twin's rig clock (rate limit, watchdog) is simulated, so the measurements and the result are the same as without it (tested on a seeded run).
+- **Rule 5 of CLAUDE.md, clarified.** The LLM still never sets the simulator's ground truth or the safety bounds on its own: it drafts, the operator checks, edits if needed and confirms, and hard-coded gates validate the result.
+
+### How it was verified
+- `tests/test_experiment_drafting.py` (27 tests), offline:
+  - every offline draft passes the gates and none of its law, title, apparatus or constants reaches the agent view;
+  - unknown names, too-short or too-long names and provider "none" are refused with a reason;
+  - unsafe laws, named constants, a reversed range, a law that is infinite or constant on the range, hinting variable names and an infeasible draft are all rejected;
+  - a failed draft is re-asked with the problem and the previous draft; drafting gives up after three attempts;
+  - a real-model reply (scripted litellm response, fenced JSON) is parsed, validated and recorded with its model and tokens;
+  - a drafted pendulum runs blind, converges on a power law within 3σ of the law, and the saved record holds the provenance; no prompt contains the constants;
+  - the Live Lab page drafts, shows the fields, keeps Run disabled until the confirmation is ticked, runs, and shows the provenance; an undraftable name shows the reason;
+  - drafting reports each step, including a rejection and the re-ask;
+  - a paced live run gives exactly the same measurements and law as an unpaced one with the same seed.
+- The custom-experiment page test now selects "Type the law yourself" first, and uses seed 0 instead of a random seed: with a random seed and a budget of 8, a straight line was occasionally ranked as a quadratic, so the test could fail by chance.
+- Mock runs of the eight offline drafts, seeds 0–2: pendulum, resistor, cooling, capacitor discharge and spring converged in 8–13 measurements within 0.4–1.5σ of the law. Free fall, the gas syringe and the charged spheres stayed within 0.3–1.0σ of the law but ran to the 30-point budget, because two library families describe the same curve (t² as a quadratic or a power law; 1/x² as a power law or an inverse square with zero offset) and ΔBIC between them cannot reach 6. This is the known limitation of equivalent model families, not a drafting problem.
+- `pytest -q`: 474 passed.
+- Checked by hand in a browser (headless Chromium): drafting the pendulum, the status box, confirming, and a paced run adding points one by one until it stopped.

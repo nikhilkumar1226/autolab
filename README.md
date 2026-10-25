@@ -75,6 +75,12 @@ Run on the **Inverse-Square Law**:
 python3 main.py --experiment inverse_square_law
 ```
 
+Try an experiment that is not in the registry (dashboard, `streamlit run app/Home.py` → **Live Lab** → Experiment: *✎ Your own law*):
+- **By name:** type e.g. "simple pendulum: period against length" and press *Draft the experiment*. The LLM drafts the variables, units, range and law; you check them, tick the confirmation box and press Run. The agents never see the name or the law. Without a real LLM unlocked, an offline table of eight textbook experiments is used.
+- **Type the law yourself:** enter any y = f(x), a range and units.
+
+Both run on the digital twin, and the result says whether the law was recovered.
+
 ### 3. Output Artifacts
 Every run automatically produces:
 - **Publication Plot:** High-resolution 3-panel chart saved in `output/plots/discovery_plot_*.png`

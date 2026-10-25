@@ -8,6 +8,7 @@ messages, safety events and the rig status.
 """
 import copy
 import threading
+import time
 import traceback
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -63,9 +64,13 @@ def _by(source: Optional[str], model: Optional[str]) -> str:
 
 
 class LiveRun:
-    def __init__(self, config: SystemConfig, question: Optional[str] = None, spec: Optional[ExperimentSpec] = None):
+    def __init__(self, config: SystemConfig, question: Optional[str] = None, spec: Optional[ExperimentSpec] = None,
+                 pace_s: float = 0.0):
         self.config = config
         self.question = question
+        # Display pacing: a wall-clock pause after each measurement so an audience can follow the run point by
+        # point. It only slows the thread; the twin's rig clock (rate limit, watchdog) is simulated and unaffected.
+        self.pace_s = max(0.0, float(pace_s))
         # `spec` is given for a custom experiment (the operator's law); otherwise the registry entry is used.
         self.engine = DiscoveryEngine(config, on_event=self._on_event, spec=spec)
         self._state = LiveState()
@@ -119,6 +124,8 @@ class LiveRun:
             handler = getattr(self, f"_on_{e.type}", None)
             if handler is not None:
                 handler(self._state, e)
+        if self.pace_s and e.type == "measurement":
+            time.sleep(self.pace_s)
 
     def _on_run_started(self, s: LiveState, e) -> None:
         s.run_id, s.experiment, s.question = e.run_id, e.experiment, e.question

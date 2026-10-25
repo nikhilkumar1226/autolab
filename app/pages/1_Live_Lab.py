@@ -13,14 +13,17 @@ if str(ROOT) not in sys.path:
 
 import streamlit as st
 
-from app.lib.access import decide, password_configured, provider_for
+from app.lib.access import decide, key_configured, password_configured, password_ok, provider_for
 from app.lib.charts import discovery_chart
 from app.lib.live import LiveRun, LiveState, make_config
 from app.lib.style import badge, card, chip, setup_page
 from app.lib.views import best_curve, criteria_table, fits_table
 from app.lib.views import law_curve
+from app.lib.drafts import BY_LAW, BY_NAME, drafted_experiment_panel, short_error
 from experiments.custom import EXAMPLES, CustomLaw, agreement_verdict, build_custom_experiment, law_agreement
 from experiments.registry import CUSTOM_NAME, EXPERIMENTS, get_experiment
+
+DEMO_PACE_S = 0.9   # seconds shown per measurement with "Demo pace" on
 
 setup_page("Live Lab")
 ss = st.session_state
@@ -41,30 +44,37 @@ with st.sidebar:
     )
     custom_error = ""
     if experiment == CUSTOM_NAME:
-        st.caption("Type any law y = f(x). The digital twin simulates it with noise; the agents see only the "
-                   "variable names, units and range, never the law.")
-        example = st.selectbox("Start from an example", list(EXAMPLES))
-        ex_law, ex_lo, ex_hi = EXAMPLES[example]
-        law_text = st.text_input(
-            "Law  y = f(x)", value=ex_law, key=f"law_{example}",
-            help="Numbers, x, pi, e, + - * / ** (or ^), and sin cos tan exp log sqrt abs radians. Checked by the same "
-                 "whitelist as the Analyst's formulas and never run as code.")
-        c1, c2 = st.columns(2)
-        x_min = c1.number_input("x from", value=ex_lo, key=f"xmin_{example}")
-        x_max = c2.number_input("x to", value=ex_hi, key=f"xmax_{example}")
-        x_name = c1.text_input("x name", value="input")
-        x_units = c2.text_input("x units", value="a.u.")
-        y_name = c1.text_input("y name", value="response")
-        y_units = c2.text_input("y units", value="a.u.")
-        noise_pct = st.slider("Noise (% of the response span)", 0.2, 10.0, 1.0, 0.1,
-                              help="Standard deviation of the simulated measurement noise.")
-        try:
-            spec = build_custom_experiment(CustomLaw(
-                expression=law_text, x_min=x_min, x_max=x_max, x_name=x_name or "input", x_units=x_units,
-                y_name=y_name or "response", y_units=y_units, noise_pct=noise_pct))
-        except ValueError as exc:
-            spec, custom_error = None, str(exc).splitlines()[-1] if "validation error" in str(exc) else str(exc)
-            st.error(f"Cannot run this law: {custom_error}")
+        how = st.radio("Define the experiment", [BY_NAME, BY_LAW], key="custom_mode",
+                       help="By name: a language model drafts the variables, units, range and law, and you confirm "
+                            "them. Type the law: you write y = f(x) yourself.")
+        if how == BY_NAME:
+            spec, custom_error = drafted_experiment_panel(
+                access.real_llm or (key_configured() and password_configured() and password_ok(entered)))
+        else:
+            st.caption("Type any law y = f(x). The digital twin simulates it with noise; the agents see only the "
+                       "variable names, units and range, never the law.")
+            example = st.selectbox("Start from an example", list(EXAMPLES))
+            ex_law, ex_lo, ex_hi = EXAMPLES[example]
+            law_text = st.text_input(
+                "Law  y = f(x)", value=ex_law, key=f"law_{example}",
+                help="Numbers, x, pi, e, + - * / ** (or ^), and sin cos tan exp log sqrt abs radians. Checked by the "
+                     "same whitelist as the Analyst's formulas and never run as code.")
+            c1, c2 = st.columns(2)
+            x_min = c1.number_input("x from", value=ex_lo, key=f"xmin_{example}")
+            x_max = c2.number_input("x to", value=ex_hi, key=f"xmax_{example}")
+            x_name = c1.text_input("x name", value="input")
+            x_units = c2.text_input("x units", value="a.u.")
+            y_name = c1.text_input("y name", value="response")
+            y_units = c2.text_input("y units", value="a.u.")
+            noise_pct = st.slider("Noise (% of the response span)", 0.2, 10.0, 1.0, 0.1,
+                                  help="Standard deviation of the simulated measurement noise.")
+            try:
+                spec = build_custom_experiment(CustomLaw(
+                    expression=law_text, x_min=x_min, x_max=x_max, x_name=x_name or "input", x_units=x_units,
+                    y_name=y_name or "response", y_units=y_units, noise_pct=noise_pct))
+            except ValueError as exc:
+                spec, custom_error = None, short_error(exc)
+                st.error(f"Cannot run this law: {custom_error}")
     else:
         spec = get_experiment(experiment)
     y_word, x_word = (spec.dependent.name, spec.independent.name) if spec is not None else ("response", "input")
@@ -84,6 +94,9 @@ with st.sidebar:
     nonideal = st.toggle("Non-idealities", value=False, help="Drift, saturation, quantisation, position error, backlash, outliers.")
     faults = st.toggle("Inject faults", value=False, help="A light spike, a stuck actuator and a sensor dropout.")
     budget = st.slider("Measurement budget", 8, access.max_measurements, min(20, access.max_measurements))
+    demo_pace = st.toggle("Demo pace", value=True,
+                          help="Pause about a second after each measurement so the audience can follow the run point by "
+                               "point. Display only: it does not change the measurements or the result.")
     random_seed = st.toggle("Random seed", value=True)
     seed = int(st.number_input("Seed", min_value=0, max_value=2**31 - 1, value=0, step=1, disabled=random_seed))
 
@@ -103,7 +116,8 @@ c_info.caption(f"Runs left this session: {access.max_runs}. {access.reason.capit
 if run_clicked and not (live and live.alive) and access.max_runs > 0 and spec is not None:
     run_seed = secrets.randbits(31) if random_seed else seed
     cfg = make_config(experiment, run_seed, provider, model, blind, nonideal, faults, budget)
-    live = LiveRun(cfg, question.strip() or None, spec=spec if experiment == CUSTOM_NAME else None).start()
+    live = LiveRun(cfg, question.strip() or None, spec=spec if experiment == CUSTOM_NAME else None,
+                   pace_s=DEMO_PACE_S if demo_pace else 0.0).start()
     ss.live = live
     ss.runs += 1
     ss.llm_runs += provider == "litellm"
@@ -187,6 +201,12 @@ def render(s: LiveState, running: bool) -> None:
                     st.latex(r.result.equation_latex)
                 if r.experiment.law:
                     gap = law_agreement(r.experiment.law, best, r.experiment.agent_view.safe_bounds, r.experiment.noise_std)
+                    d = r.experiment.draft
+                    if d:
+                        who = "the offline mock" if d.get("provider") == "mock" else (d.get("model") or "the LLM")
+                        edited = ", then edited by you" if d.get("edited_by_operator") else ""
+                        st.markdown(f"**Drafted experiment:** “{d.get('drafted_from', '')}”, drafted by {who}{edited} "
+                                    f"and confirmed by you. Constants: {d.get('constants') or '–'}")
                     st.markdown(f"**Your law** (never shown to the agents): `y = {r.experiment.law}`")
                     (st.success if gap is not None and gap <= 3.0 else st.warning)(agreement_verdict(gap))
                 if r.discussion is not None and r.discussion.discussion:

@@ -80,6 +80,28 @@ Rules:
 Return JSON: {"discussion": "one to three paragraphs", "conclusion": "two to four sentences"}."""
 
 
+# The Drafter is not a discovery agent. It runs before an experiment, only on the operator's request, and turns
+# an experiment name into a draft custom experiment (variables, units, range, law) that the operator must check
+# and confirm on the dashboard. It never takes part in the run, and its draft goes through the same gates as an
+# operator-typed law (experiments/custom.py). Versioned separately so the discovery prompts' version is unchanged.
+DRAFT_PROMPT_VERSION = "draft-v1"
+
+DRAFTER_SYSTEM = """You help an operator set up a simulated experiment for AutoLab, a laboratory that discovers how a measured quantity depends on ONE controlled variable. The input JSON gives the experiment the operator named.
+Return JSON with:
+- feasible: false if the name is not a physical, chemical, biological or engineering measurement that can be reduced to one controlled variable x and one measured quantity y; then give the reason and leave the other fields with any placeholder values;
+- reason: one sentence (why it is or is not feasible);
+- title: a short title for the experiment;
+- apparatus: one or two sentences describing a realistic bench setup;
+- x_name, x_units, x_min, x_max: the controlled variable, its units and a realistic range (x_min < x_max);
+- y_name, y_units: the measured quantity and its units;
+- law: the textbook relationship y = f(x) written ONLY with numbers, x, pi, e, + - * / ** and unary minus, and one-argument calls to sin, cos, tan, exp, log, sqrt, abs, radians (trigonometric functions take radians). Substitute every constant by its numerical value: no other names are allowed. At most 200 characters. It must be finite everywhere on [x_min, x_max] and must change over that range;
+- constants: the constants and values you substituted, in one sentence;
+- noise_pct: a realistic measurement noise as a percentage of the response span (between 0.2 and 10; 1 is typical).
+x_name and y_name are shown to the discovery agents, so they must describe the quantities without naming or hinting at the law (write "pendulum length" and "period", never "length in Ohm's law" or "exponential decay time").
+If previous_problem is present, your previous draft (previous_draft) was rejected for that reason: return a corrected draft.
+You only draft. The operator checks and confirms the draft, and hard-coded checks validate it, before anything runs."""
+
+
 def sig(value: float, digits: int = 4) -> float:
     """Round to significant digits (keeps prompts short)."""
     return float(f"{value:.{digits}g}") if value != 0 else 0.0

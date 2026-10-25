@@ -12,6 +12,7 @@ from streamlit.testing.v1 import AppTest
 
 from agents.orchestrator import DiscoveryEngine
 from analysis.candidate_models import FormulaRejected, compile_law
+from app.lib.drafts import BY_LAW
 from app.lib.live import LiveRun, make_config
 from config import SystemConfig
 from experiments.custom import (EXAMPLES, CustomExperimentError, CustomLaw, agreement_verdict, build_custom_experiment,
@@ -129,6 +130,8 @@ def test_the_live_lab_runs_a_custom_law(tmp_path, monkeypatch):
     at.run()
     at.sidebar.selectbox[0].set_value(CUSTOM_NAME)
     at.run()
+    at.sidebar.radio[0].set_value(BY_LAW)
+    at.run()
     law_box = next(t for t in at.sidebar.text_input if t.label.startswith("Law"))
     law_box.set_value("open('x')")
     at.run()
@@ -138,6 +141,7 @@ def test_the_live_lab_runs_a_custom_law(tmp_path, monkeypatch):
     at.run()
     assert not at.sidebar.error
     next(sl for sl in at.sidebar.slider if sl.label == "Measurement budget").set_value(8)
+    next(t for t in at.sidebar.toggle if t.label == "Random seed").set_value(False)   # seed 0: deterministic
     at.button[0].click()
     at.run(timeout=300)
     assert not at.exception
