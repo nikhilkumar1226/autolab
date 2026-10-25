@@ -72,6 +72,12 @@ if record.experiment.law:
     best_fit = record.result.final_analysis.best if record.result and record.result.final_analysis else None
     gap = law_agreement(record.experiment.law, best_fit, record.experiment.agent_view.safe_bounds,
                         record.experiment.noise_std)
+    d = record.experiment.draft
+    if d:
+        who = "the offline mock" if d.get("provider") == "mock" else (d.get("model") or "an LLM")
+        edited = ", edited by the operator" if d.get("edited_by_operator") else ""
+        st.markdown(f"**Drafted from the name** “{d.get('drafted_from', '')}” by {who}{edited}, confirmed by the operator "
+                    f"before the run. Constants: {d.get('constants') or '–'}")
     st.markdown(f"**Custom experiment.** The operator's law (never shown to the agents): `y = {record.experiment.law}`")
     (st.success if gap is not None and gap <= 3.0 else st.warning)(agreement_verdict(gap))
 

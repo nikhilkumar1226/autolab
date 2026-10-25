@@ -33,6 +33,7 @@ Data flow per iteration: Planner/Analyst propose a position (JSON) → SafetyGua
 4. **Three LLM providers, selectable by `LLM_PROVIDER`:** `litellm` (real model: Claude `LLM_MODEL` first, then Gemini models in `LLM_FALLBACKS`; record which model answered; never fall back silently to mock in a real run), `mock` (deterministic, no network; used by all tests and the public demo), `none` (no LLM: heuristic fallback; used as the ablation baseline). Everything must run with `mock` and no API key.
 5. **API budget is tight** (paid Claude credit, small Gemini free quota): keep prompts compact, cache responses, back off on 429, never loop on retries.
    The LLM must never set safety bounds or the simulator's ground truth (a mistake found in an earlier teammate version).
+   Exception by design: on the dashboard an LLM may *draft* a custom experiment from its name (experiments/drafting.py); the draft passes the custom-law gates and runs only after the operator has checked and confirmed it, and the record says it was drafted.
 6. **Tests never hit the network or a real LLM.** Use the `mock` provider. `pytest -q` must pass before every commit.
 7. **Reproducibility:** every run takes a `seed`; every random draw uses a `numpy.random.Generator` created from it (no global `np.random.seed`). Every run is saved as a JSON record in `runs/` (config, seed, every step, every LLM call with tokens/cost/latency, fits, final result).
 8. **Blind analysis:** the Analyst must not be told the true law or the experiment's internal name. It sees only variable names, units and data.

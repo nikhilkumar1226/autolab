@@ -19,7 +19,7 @@ Schema 1 and 2 records still load: every newer field has a default.
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 from pydantic import BaseModel, Field
 
@@ -53,6 +53,9 @@ class ExperimentSnapshot(BaseModel):
     true_params: Dict[str, float]
     physical_params: Optional[Dict[str, float]] = None
     law: Optional[str] = Field(default=None, description="Custom experiments: the operator's law y = f(x)")
+    draft: Optional[Dict[str, Any]] = Field(
+        default=None, description="Drafted experiments: the name typed, the model that drafted the law, every drafting "
+                                  "call, and whether the operator edited and confirmed it")
 
     @classmethod
     def from_spec(cls, spec: ExperimentSpec, noise_std: Optional[float]) -> "ExperimentSnapshot":
@@ -64,6 +67,7 @@ class ExperimentSnapshot(BaseModel):
             true_params=dict(spec.true_params),
             physical_params=dict(spec.physical_params) if spec.physical_params is not None else None,
             law=spec.law,
+            draft=spec.draft,
         )
 
 

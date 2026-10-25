@@ -20,7 +20,7 @@ The internal `name` (e.g. "malus_law") names the law, so it is never part of
 the agent view either.
 """
 import math
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -104,6 +104,10 @@ class ExperimentSpec(BaseModel):
     true_params: Dict[str, float] = Field(description="True parameters, named as in the library model")
     law: Optional[str] = Field(
         default=None, description="Custom experiments only: the law y = f(x) the operator typed (never shown to agents)"
+    )
+    draft: Optional[Dict[str, Any]] = Field(
+        default=None, description="Drafted experiments only: who drafted the law from which name, and the operator's "
+                                  "confirmation (experiments/drafting.py); never shown to agents"
     )
 
     @model_validator(mode="after")
