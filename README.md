@@ -232,11 +232,3 @@ The suite has **474 tests**. It includes unit, integration and property-based te
 The design borrows ideas from **IEC 61508** (a separate safety function), **IEC 61010-1** (safe even under a single fault), **ISO/IEC 27001** (secrets and access) and **RFC 2217** (serial over network for Wokwi). **No compliance or certification is claimed.** See [`docs/safety_and_standards.md`](docs/safety_and_standards.md).
 
 ---
-
-## Roadmap
-
-1. Build and calibrate the physical rig, then compare it side by side with the twin.
-2. Run the 72-run real-LLM benchmark subset.
-3. Add a model-discrimination sampler (Box–Hill) to remove the 8-point floor.
-4. Calibrate instrument noise for tighter outlier detection.
-5. Extend to multi-variable experiments (e.g. PID tuning, solar-panel tilt × load).
