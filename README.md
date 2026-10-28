@@ -190,30 +190,6 @@ The free-tier chain used in the project is Gemini 3.5 Flash-Lite, then Groq gpt-
 
 ---
 
-## Hardware
-
-**Designed rig: ₹1,760**, or ₹2,660 with the TSL2591 lux sensor.
-
-| Part | Connection |
-|---|---|
-| Arduino Uno R3 | USB, 115200 baud |
-| SG90 servo (rotates the polariser) | Signal on **D9** (544–2400 µs) |
-| GL5528 LDR + 10 kΩ divider | **A0** |
-| 470 µF capacitor | Across the servo supply |
-| TSL2591 (optional, calibrated lux) | I²C on **A4/A5** (0x29) |
-
-**Firmware v2.0.0** (`firmware/arduino_rig/arduino_rig.ino`) is a line-based protocol: `PING`, `VERSION`, `HOME`, `MOVE`, `READ`, `STATUS`, `ESTOP`, `RESET`. It enforces its own bounds, uses a strict number parser and a 300 s watchdog, and returns error codes such as `E_BOUNDS` and `E_ESTOP`. The rig stays safe even if the PC software is wrong.
-
-**Wokwi (no hardware needed):** open the folder in VS Code and start the Wokwi simulator. The prebuilt firmware is in `firmware/build/`. Then run:
-
-```bash
-python main.py --experiment malus_law --hardware --port rfc2217://localhost:4000 --provider mock
-```
-
-**Real board:** `--hardware --port COM3` (Windows) or `--port /dev/ttyUSB0` (Linux). See [`docs/wokwi.md`](docs/wokwi.md).
-
----
-
 ## Repository structure
 
 ```
